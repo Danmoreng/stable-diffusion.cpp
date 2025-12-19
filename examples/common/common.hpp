@@ -1497,6 +1497,7 @@ struct SDGenerationParams {
         load_if_exists("high_noise_skip_layers", high_noise_skip_layers);
 
         load_if_exists("cfg_scale", sample_params.guidance.txt_cfg);
+        load_if_exists("sample_steps", sample_params.sample_steps);
         load_if_exists("img_cfg_scale", sample_params.guidance.img_cfg);
         load_if_exists("guidance", sample_params.guidance.distilled_guidance);
 

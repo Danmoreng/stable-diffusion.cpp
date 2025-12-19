@@ -293,6 +293,15 @@ int main(int argc, const char** argv) {
 
     httplib::Server svr;
 
+    // Mount the outputs directory to serve generated images
+    if (!svr.set_mount_point("/outputs", "./outputs")) {
+        LOG_WARN("failed to mount ./outputs directory, will not serve history images");
+    }
+    // Mount a directory to serve static files (our web UI)
+    if (!svr.set_mount_point("/", "./public")) {
+        LOG_WARN("failed to mount ./public directory, will not serve static files");
+    }
+
     svr.set_pre_routing_handler([](const httplib::Request& req, httplib::Response& res) {
         std::string origin = req.get_header_value("Origin");
         if (origin.empty()) {
@@ -321,6 +330,33 @@ int main(int argc, const char** argv) {
         r["data"] = json::array();
         r["data"].push_back({{"id", "sd-cpp-local"}, {"object", "model"}, {"owned_by", "local"}});
         res.set_content(r.dump(), "application/json");
+    });
+
+    // image history endpoint
+    svr.Get("/v1/history/images", [&](const httplib::Request&, httplib::Response& res) {
+        const std::string output_dir = "outputs";
+        json image_files = json::array();
+        try {
+            if (fs::exists(output_dir) && fs::is_directory(output_dir)) {
+                std::vector<std::string> files;
+                for (const auto& entry : fs::directory_iterator(output_dir)) {
+                    if (entry.is_regular_file()) {
+                        files.push_back(entry.path().filename().string());
+                    }
+                }
+                // Sort files descending (newest first)
+                std::sort(files.rbegin(), files.rend());
+                for(const auto& file : files) {
+                    image_files.push_back(file);
+                }
+            }
+        } catch (const std::exception& e) {
+            LOG_ERROR("failed to list image history: %s", e.what());
+            res.status = 500;
+            res.set_content(R"({"error":"failed to list image history"})", "application/json");
+            return;
+        }
+        res.set_content(image_files.dump(), "application/json");
     });
 
     // core endpoint: /v1/images/generations
@@ -386,10 +422,19 @@ int main(int argc, const char** argv) {
             gen_params.height             = height;
             gen_params.batch_count        = n;
 
-            if (!sd_cpp_extra_args_str.empty() && !gen_params.from_json_str(sd_cpp_extra_args_str)) {
-                res.status = 400;
-                res.set_content(R"({"error":"invalid sd_cpp_extra_args"})", "application/json");
-                return;
+            bool save_image = false;
+            if (!sd_cpp_extra_args_str.empty()) {
+                try {
+                    json extra_args_json = json::parse(sd_cpp_extra_args_str);
+                    save_image = extra_args_json.value("save_image", false);
+                } catch (const json::parse_error& e) {
+                    LOG_WARN("Failed to parse sd_cpp_extra_args as JSON: %s", e.what());
+                }
+                if (!gen_params.from_json_str(sd_cpp_extra_args_str)) {
+                    res.status = 400;
+                    res.set_content(R"({"error":"invalid sd_cpp_extra_args"})", "application/json");
+                    return;
+                }
             }
 
             if (!gen_params.process_and_check(IMG_GEN, "")) {
@@ -457,6 +502,23 @@ int main(int argc, const char** argv) {
                 if (image_bytes.empty()) {
                     LOG_ERROR("write image to mem failed");
                     continue;
+                }
+
+                if (save_image) {
+                    try {
+                        const std::string output_dir = "outputs";
+                        if (!fs::exists(output_dir)) {
+                            fs::create_directory(output_dir);
+                        }
+                        // a timestamp in microseconds + seed should be unique enough
+                        auto timestamp = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+                        std::string filename = output_dir + "/img-" + std::to_string(timestamp) + "-" + std::to_string(gen_params.seed) + ".png";
+                        std::ofstream file(filename, std::ios::binary);
+                        file.write(reinterpret_cast<const char*>(image_bytes.data()), image_bytes.size());
+                        LOG_INFO("saved image to %s", filename.c_str());
+                    } catch (const std::exception& e) {
+                        LOG_ERROR("failed to save image: %s", e.what());
+                    }
                 }
 
                 // base64 encode
