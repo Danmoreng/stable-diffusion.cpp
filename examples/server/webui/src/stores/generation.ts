@@ -11,7 +11,7 @@ export const useGenerationStore = defineStore('generation', () => {
     sampler: 'euler_a',
     width: 1024,
     height: 768,
-    theme: 'dark' as 'light' | 'dark',
+    theme: 'system' as 'light' | 'dark' | 'system',
     saveImages: true,
     strength: 0.75,
     batchCount: 1,
@@ -45,7 +45,7 @@ export const useGenerationStore = defineStore('generation', () => {
 
   // UI State
   const isSidebarCollapsed = ref(localStorage.getItem('sidebar-collapsed') === 'true')
-  const theme = ref(initialState.theme)
+  const theme = ref(initialState.theme as 'light' | 'dark' | 'system')
   const saveImages = ref(initialState.saveImages)
 
   // Model Management State
@@ -199,16 +199,33 @@ export const useGenerationStore = defineStore('generation', () => {
     isSidebarCollapsed.value = !isSidebarCollapsed.value
   }
 
+  function applyTheme() {
+    let targetTheme = theme.value;
+    if (targetTheme === 'system') {
+      targetTheme = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    }
+    document.documentElement.setAttribute('data-bs-theme', targetTheme)
+  }
+
   function toggleTheme() {
-    theme.value = theme.value === 'dark' ? 'light' : 'dark';
+    if (theme.value === 'system') theme.value = 'light';
+    else if (theme.value === 'light') theme.value = 'dark';
+    else theme.value = 'system';
   }
 
   // --- Effects ---
 
   // Watch for theme changes and apply them to the root element
-  watch(theme, (newTheme) => {
-    document.documentElement.setAttribute('data-bs-theme', newTheme)
+  watch(theme, () => {
+    applyTheme();
   }, { immediate: true })
+
+  // Listen for system theme changes
+  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+    if (theme.value === 'system') {
+      applyTheme();
+    }
+  });
 
 
   // Watch for changes in settings and persist them to localStorage
