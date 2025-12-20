@@ -15,7 +15,9 @@ This document contains general instructions for the Gemini agent in this project
 ## Model Management
 *   **Directory:** All models are stored in `C:\StableDiffusion\models`.
 *   **Structure:** Models are categorized into subdirectories: `stable-diffusion/`, `vae/`, `lora/`, `text-encoder/`, `esrgan/`.
-*   **Configurations:** Every main model in `stable-diffusion/` should have a matching `.json` sidecar file (e.g., `model.gguf.json`) to define its associated VAE, encoders, and performance flags (`clip_on_cpu`, `flash_attn`, `vae_tiling`, `offload_to_cpu`).
+*   **Configurations:** Every main model in `stable-diffusion/` should have a matching `.json` sidecar file (e.g., `model.gguf.json`) to define its associated VAE, encoders, and performance flags. 
+    *   Supported keys (with Forge compatibility): `vae` (or `vae_path`/`ae`), `clip_l` (or `clip_l_path`/`clip_path`), `clip_g` (or `clip_g_path`), `t5xxl` (or `t5xxl_path`), `llm` (or `llm_path`), `clip_on_cpu`, `flash_attn`, `vae_tiling`, `offload_to_cpu`, `clip_skip`.
+*   **Generation Parameters:** Metadata for generated images is saved in A1111/Forge compatible `.txt` files alongside the images.
 
 ## Build & Run Procedures
 *   **Full Build:** Use `.\install_sd_cpp.ps1` to build both the frontend and the backend.

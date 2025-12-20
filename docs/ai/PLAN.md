@@ -69,6 +69,12 @@
 18. **Flexible History Gallery:**
     *   Switched from Bootstrap Grid to custom CSS Grid for precise layout control.
     *   Added header controls with a range slider to choose between 2 and 12 images per row.
+19. **Forge / A1111 Compatibility:**
+    *   Backend: Switched sidecar parameter saving from `.json` to A1111-compatible `.txt` format.
+    *   Backend: Implemented a text metadata parser for the history API (with JSON fallback).
+    *   Backend: Added support for Forge-compatible JSON keys (`vae_path`, `clip_l_path`, `ae`, `clip_skip`) in model configurations.
+    *   Frontend: Added "Apply Forge Parameters" magic button to instantly populate settings from pasted metadata.
+    *   Frontend: Integrated "Forge Format" display and copy-to-clipboard functionality in the gallery and result views.
 
 ### Next Milestones
     
