@@ -24,9 +24,13 @@ $modelDir = Join-Path $ProjectRoot "models"
 
 Push-Location $serverBinDir
 
-# Execute the server with only the model directory.
-# No initial model is passed, so the user can select one in the UI.
-Write-Host "Starting server (Model directory: $modelDir)..." -ForegroundColor Green
-& $serverExe --model-dir "$modelDir" --listen-port 1234
-
-Pop-Location
+try {
+    # Execute the server with only the model directory.
+    # No initial model is passed, so the user can select one in the UI.
+    Write-Host "Starting server (Model directory: $modelDir)..." -ForegroundColor Green
+    & $serverExe --model-dir "$modelDir" --listen-port 1234
+}
+finally {
+    Pop-Location
+    Write-Host "`nServer stopped. Returned to: $(Get-Location)" -ForegroundColor Gray
+}
