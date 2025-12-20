@@ -14,6 +14,7 @@ export const useGenerationStore = defineStore('generation', () => {
     theme: 'dark' as 'light' | 'dark',
     saveImages: true,
     strength: 0.75,
+    batchCount: 1,
   }
 
   // Load state from localStorage or use defaults
@@ -21,7 +22,7 @@ export const useGenerationStore = defineStore('generation', () => {
   const initialState = savedSettings ? { ...defaults, ...JSON.parse(savedSettings) } : defaults
 
   const isLoading = ref(false)
-  const imageUrl = ref<string | null>(null)
+  const imageUrls = ref<string[]>([])
   const error = ref<string | null>(null)
 
   // State for parameters
@@ -31,6 +32,7 @@ export const useGenerationStore = defineStore('generation', () => {
   const seed = ref(-1) // Seed is not persisted
   const cfgScale = ref(initialState.cfgScale)
   const strength = ref(initialState.strength)
+  const batchCount = ref(initialState.batchCount)
   const sampler = ref(initialState.sampler)
   const samplers = ref(['euler', 'euler_a', 'heun', 'dpm2', 'dpmpp_2s_a', 'dpmpp_2m', 'dpmpp_2mv2', 'ipndm', 'ipndm_v', 'lcm', 'ddim_trailing', 'tcd'])
   const width = ref(initialState.width)
@@ -61,7 +63,7 @@ export const useGenerationStore = defineStore('generation', () => {
 
 
   // Watch for changes in settings and persist them to localStorage
-  watch([prompt, negativePrompt, steps, cfgScale, sampler, width, height, theme, saveImages, strength], (newValues) => {
+  watch([prompt, negativePrompt, steps, cfgScale, sampler, width, height, theme, saveImages, strength, batchCount], (newValues) => {
     const settingsToSave = {
       prompt: newValues[0],
       negativePrompt: newValues[1],
@@ -73,6 +75,7 @@ export const useGenerationStore = defineStore('generation', () => {
       theme: newValues[7],
       saveImages: newValues[8],
       strength: newValues[9],
+      batchCount: newValues[10],
     }
     localStorage.setItem('webui-settings', JSON.stringify(settingsToSave))
   }, { deep: true })
@@ -87,6 +90,7 @@ export const useGenerationStore = defineStore('generation', () => {
     seed: number
     cfgScale: number
     strength: number
+    batchCount: number
     sampler: string
     width: number
     height: number
@@ -96,7 +100,7 @@ export const useGenerationStore = defineStore('generation', () => {
 
   async function generateImage(params: GenerationParams) {
     isLoading.value = true
-    imageUrl.value = null
+    imageUrls.value = []
     error.value = null
 
     try {
@@ -106,6 +110,7 @@ export const useGenerationStore = defineStore('generation', () => {
         sample_steps: params.steps,
         cfg_scale: params.cfgScale,
         strength: params.strength,
+        n: params.batchCount,
         sampling_method: params.sampler.toLowerCase().replace(' a', '_a').replace(/\+\+/g, 'pp'),
         seed: params.seed,
         width: params.width,
@@ -131,11 +136,11 @@ export const useGenerationStore = defineStore('generation', () => {
       }
 
       const responseData = await response.json();
-      const b64Json = responseData.data[0].b64_json;
-      if (!b64Json) {
+      if (!responseData.data || responseData.data.length === 0) {
         throw new Error('Server response did not contain image data.');
       }
-      imageUrl.value = `data:image/png;base64,${b64Json}`;
+      
+      imageUrls.value = responseData.data.map((item: any) => `data:image/png;base64,${item.b64_json}`);
 
     } catch (e: any) {
       error.value = e.message
@@ -145,5 +150,5 @@ export const useGenerationStore = defineStore('generation', () => {
     }
   }
 
-  return { isLoading, imageUrl, error, generateImage, prompt, negativePrompt, steps, seed, cfgScale, strength, sampler, samplers, width, height, isSidebarCollapsed, toggleSidebar, theme, toggleTheme, saveImages, initImage }
+  return { isLoading, imageUrls, error, generateImage, prompt, negativePrompt, steps, seed, cfgScale, strength, batchCount, sampler, samplers, width, height, isSidebarCollapsed, toggleSidebar, theme, toggleTheme, saveImages, initImage }
 })

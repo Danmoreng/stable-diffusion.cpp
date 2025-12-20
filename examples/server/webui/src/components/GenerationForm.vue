@@ -10,22 +10,22 @@ const store = useGenerationStore()
 
 const n = () => {
   if (!store.prompt || store.isLoading) return
-  store.generateImage({
-    prompt: store.prompt,
-    negative_prompt: store.negativePrompt,
-    steps: store.steps,
-    seed: store.seed,
-    cfgScale: store.cfgScale,
-    strength: store.strength,
-    sampler: store.sampler,
-    width: store.width,
-    height: store.height,
-    saveImages: store.saveImages,
-    initImage: props.mode === 'img2img' ? store.initImage : null
-  })
-}
-
-const onFileChange = (e: Event) => {
+      store.generateImage({
+      prompt: store.prompt,
+      negative_prompt: store.negativePrompt,
+      steps: store.steps,
+      seed: store.seed,
+      cfgScale: store.cfgScale,
+      strength: store.strength,
+      batchCount: store.batchCount,
+      sampler: store.sampler,
+      width: store.width,
+      height: store.height,
+      saveImages: store.saveImages,
+      initImage: props.mode === 'img2img' ? store.initImage : null
+    })
+  }
+  const onFileChange = (e: Event) => {
   const target = e.target as HTMLInputElement
   if (target.files && target.files[0]) {
     const reader = new FileReader()
@@ -128,7 +128,7 @@ const clearInitImage = () => {
       </div>
 
       <div class="row g-3 mb-3">
-        <div class="col-md-6">
+        <div class="col-md-4">
           <label for="steps" class="form-label">Steps:</label>
           <input
             type="number"
@@ -139,7 +139,18 @@ const clearInitImage = () => {
             class="form-control"
           />
         </div>
-        <div class="col-md-6">
+        <div class="col-md-4">
+          <label for="batchCount" class="form-label">Batch Count:</label>
+          <input
+            type="number"
+            id="batchCount"
+            v-model.number="store.batchCount"
+            min="1"
+            max="8"
+            class="form-control"
+          />
+        </div>
+        <div class="col-md-4">
           <label for="seed" class="form-label">Seed:</label>
           <input
             type="number"
