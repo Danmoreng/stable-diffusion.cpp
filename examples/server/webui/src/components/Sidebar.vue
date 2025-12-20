@@ -48,6 +48,9 @@ const handleModelChange = (event: Event) => {
         <router-link to="/img2img" class="nav-link">Image-to-Image</router-link>
       </li>
       <li class="nav-item">
+        <router-link to="/exploration" class="nav-link">Dynamic Exploration</router-link>
+      </li>
+      <li class="nav-item">
         <router-link to="/settings" class="nav-link">Settings</router-link>
       </li>
       <li class="nav-item">

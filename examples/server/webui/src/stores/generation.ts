@@ -140,6 +140,47 @@ export const useGenerationStore = defineStore('generation', () => {
     initImage?: string | null
   }
 
+  async function requestImage(params: GenerationParams, signal?: AbortSignal): Promise<string[]> {
+    const body: any = {
+      prompt: params.prompt,
+      negative_prompt: params.negative_prompt,
+      sample_steps: params.steps,
+      cfg_scale: params.cfgScale,
+      strength: params.strength,
+      n: params.batchCount,
+      sampling_method: params.sampler.toLowerCase().replace(' a', '_a').replace(/\+\+/g, 'pp'),
+      seed: params.seed,
+      width: params.width,
+      height: params.height,
+      save_image: params.saveImages,
+    }
+
+    if (params.initImage) {
+      body.init_image = params.initImage
+    }
+
+    const response = await fetch('/v1/images/generations', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+      signal,
+    })
+
+    if (!response.ok) {
+      const errText = await response.text();
+      throw new Error(errText || 'An error occurred while generating the image.')
+    }
+
+    const responseData = await response.json();
+    if (!responseData.data || responseData.data.length === 0) {
+      throw new Error('Server response did not contain image data.');
+    }
+    
+    return responseData.data.map((item: any) => `data:image/png;base64,${item.b64_json}`);
+  }
+
   async function generateImage(params: GenerationParams) {
     if (isModelSwitching.value) return;
     isGenerating.value = true
@@ -147,44 +188,7 @@ export const useGenerationStore = defineStore('generation', () => {
     error.value = null
 
     try {
-      const body: any = {
-        prompt: params.prompt,
-        negative_prompt: params.negative_prompt,
-        sample_steps: params.steps,
-        cfg_scale: params.cfgScale,
-        strength: params.strength,
-        n: params.batchCount,
-        sampling_method: params.sampler.toLowerCase().replace(' a', '_a').replace(/\+\+/g, 'pp'),
-        seed: params.seed,
-        width: params.width,
-        height: params.height,
-        save_image: params.saveImages,
-      }
-
-      if (params.initImage) {
-        body.init_image = params.initImage
-      }
-
-      const response = await fetch('/v1/images/generations', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(body),
-      })
-
-      if (!response.ok) {
-        const errText = await response.text();
-        throw new Error(errText || 'An error occurred while generating the image.')
-      }
-
-      const responseData = await response.json();
-      if (!responseData.data || responseData.data.length === 0) {
-        throw new Error('Server response did not contain image data.');
-      }
-      
-      imageUrls.value = responseData.data.map((item: any) => `data:image/png;base64,${item.b64_json}`);
-
+      imageUrls.value = await requestImage(params);
     } catch (e: any) {
       error.value = e.message
       console.error(e)
@@ -193,5 +197,5 @@ export const useGenerationStore = defineStore('generation', () => {
     }
   }
 
-  return { isGenerating, isModelSwitching, imageUrls, error, generateImage, prompt, negativePrompt, steps, seed, cfgScale, strength, batchCount, sampler, samplers, width, height, isSidebarCollapsed, toggleSidebar, theme, toggleTheme, saveImages, initImage, models, currentModel, isModelsLoading, fetchModels, loadModel }
+  return { isGenerating, isModelSwitching, imageUrls, error, generateImage, requestImage, prompt, negativePrompt, steps, seed, cfgScale, strength, batchCount, sampler, samplers, width, height, isSidebarCollapsed, toggleSidebar, theme, toggleTheme, saveImages, initImage, models, currentModel, isModelsLoading, fetchModels, loadModel }
 })
