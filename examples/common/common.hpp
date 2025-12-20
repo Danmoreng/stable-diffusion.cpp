@@ -1501,6 +1501,15 @@ struct SDGenerationParams {
         load_if_exists("img_cfg_scale", sample_params.guidance.img_cfg);
         load_if_exists("guidance", sample_params.guidance.distilled_guidance);
 
+        if (j.contains("sampling_method") && j["sampling_method"].is_string()) {
+            std::string sm              = j["sampling_method"];
+            sample_params.sample_method = str_to_sample_method(sm.c_str());
+        }
+        if (j.contains("scheduler") && j["scheduler"].is_string()) {
+            std::string s           = j["scheduler"];
+            sample_params.scheduler = str_to_scheduler(s.c_str());
+        }
+
         return true;
     }
 

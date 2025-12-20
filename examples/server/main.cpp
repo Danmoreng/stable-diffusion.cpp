@@ -199,18 +199,6 @@ void parse_args(int argc, const char** argv, SDSvrParams& svr_params, SDContextP
     }
 }
 
-std::string extract_and_remove_sd_cpp_extra_args(std::string& text) {
-    std::regex re("<sd_cpp_extra_args>(.*?)</sd_cpp_extra_args>");
-    std::smatch match;
-
-    std::string extracted;
-    if (std::regex_search(text, match, re)) {
-        extracted = match[1].str();
-        text      = std::regex_replace(text, re, "");
-    }
-    return extracted;
-}
-
 enum class ImageFormat { JPEG,
                          PNG };
 
@@ -335,19 +323,39 @@ int main(int argc, const char** argv) {
     // image history endpoint
     svr.Get("/v1/history/images", [&](const httplib::Request&, httplib::Response& res) {
         const std::string output_dir = "outputs";
-        json image_files = json::array();
+        json image_list = json::array();
         try {
             if (fs::exists(output_dir) && fs::is_directory(output_dir)) {
-                std::vector<std::string> files;
+                std::vector<fs::path> image_paths;
                 for (const auto& entry : fs::directory_iterator(output_dir)) {
                     if (entry.is_regular_file()) {
-                        files.push_back(entry.path().filename().string());
+                        auto ext = entry.path().extension().string();
+                        if (ext == ".png" || ext == ".jpg" || ext == ".jpeg") {
+                            image_paths.push_back(entry.path());
+                        }
                     }
                 }
-                // Sort files descending (newest first)
-                std::sort(files.rbegin(), files.rend());
-                for(const auto& file : files) {
-                    image_files.push_back(file);
+                // Sort files descending (newest first based on filename timestamp)
+                std::sort(image_paths.begin(), image_paths.end(), [](const fs::path& a, const fs::path& b) {
+                    return a.filename().string() > b.filename().string();
+                });
+
+                for(const auto& img_path : image_paths) {
+                    json item;
+                    item["name"] = img_path.filename().string();
+                    
+                    // Try to load matching .json metadata
+                    auto json_path = img_path;
+                    json_path.replace_extension(".json");
+                    if (fs::exists(json_path)) {
+                        try {
+                            std::ifstream json_file(json_path);
+                            item["params"] = json::parse(json_file);
+                        } catch (...) {
+                            LOG_WARN("failed to parse metadata: %s", json_path.string().c_str());
+                        }
+                    }
+                    image_list.push_back(item);
                 }
             }
         } catch (const std::exception& e) {
@@ -356,7 +364,7 @@ int main(int argc, const char** argv) {
             res.set_content(R"({"error":"failed to list image history"})", "application/json");
             return;
         }
-        res.set_content(image_files.dump(), "application/json");
+        res.set_content(image_list.dump(), "application/json");
     });
 
     // core endpoint: /v1/images/generations
@@ -393,8 +401,6 @@ int main(int argc, const char** argv) {
                 return;
             }
 
-            std::string sd_cpp_extra_args_str = extract_and_remove_sd_cpp_extra_args(prompt);
-
             if (output_format != "png" && output_format != "jpeg") {
                 res.status = 400;
                 res.set_content(R"({"error":"invalid output_format, must be one of [png, jpeg]"})", "application/json");
@@ -422,20 +428,13 @@ int main(int argc, const char** argv) {
             gen_params.height             = height;
             gen_params.batch_count        = n;
 
-            bool save_image = false;
-            if (!sd_cpp_extra_args_str.empty()) {
-                try {
-                    json extra_args_json = json::parse(sd_cpp_extra_args_str);
-                    save_image = extra_args_json.value("save_image", false);
-                } catch (const json::parse_error& e) {
-                    LOG_WARN("Failed to parse sd_cpp_extra_args as JSON: %s", e.what());
-                }
-                if (!gen_params.from_json_str(sd_cpp_extra_args_str)) {
-                    res.status = 400;
-                    res.set_content(R"({"error":"invalid sd_cpp_extra_args"})", "application/json");
-                    return;
-                }
+            if (!gen_params.from_json_str(req.body)) {
+                res.status = 400;
+                res.set_content(R"({"error":"invalid params"})", "application/json");
+                return;
             }
+
+            bool save_image = j.value("save_image", false);
 
             if (!gen_params.process_and_check(IMG_GEN, "")) {
                 res.status = 400;
@@ -512,12 +511,27 @@ int main(int argc, const char** argv) {
                         }
                         // a timestamp in microseconds + seed should be unique enough
                         auto timestamp = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
-                        std::string filename = output_dir + "/img-" + std::to_string(timestamp) + "-" + std::to_string(gen_params.seed) + ".png";
-                        std::ofstream file(filename, std::ios::binary);
+                        std::string base_filename = "img-" + std::to_string(timestamp) + "-" + std::to_string(gen_params.seed);
+                        std::string img_filename = output_dir + "/" + base_filename + ".png";
+                        
+                        std::ofstream file(img_filename, std::ios::binary);
                         file.write(reinterpret_cast<const char*>(image_bytes.data()), image_bytes.size());
-                        LOG_INFO("saved image to %s", filename.c_str());
+                        LOG_INFO("saved image to %s", img_filename.c_str());
+
+                        // Save parameters as JSON
+                        std::string json_filename = output_dir + "/" + base_filename + ".json";
+                        json meta = j; // The original request JSON
+                        // Ensure it has the prompt without extra args if we were still using them, 
+                        // but now we use pure JSON, so 'j' is perfect.
+                        // We add the seed if it was random
+                        meta["seed"] = gen_params.seed;
+                        
+                        std::ofstream json_file(json_filename);
+                        json_file << meta.dump(4);
+                        LOG_INFO("saved parameters to %s", json_filename.c_str());
+
                     } catch (const std::exception& e) {
-                        LOG_ERROR("failed to save image: %s", e.what());
+                        LOG_ERROR("failed to save image or metadata: %s", e.what());
                     }
                 }
 
@@ -555,7 +569,10 @@ int main(int argc, const char** argv) {
                 return;
             }
 
-            std::string sd_cpp_extra_args_str = extract_and_remove_sd_cpp_extra_args(prompt);
+            std::string extra_args_str;
+            if (req.form.has_field("extra_args")) {
+                extra_args_str = req.form.get_field("extra_args");
+            }
 
             size_t image_count = req.form.get_file_count("image[]");
             if (image_count == 0) {
@@ -626,9 +643,9 @@ int main(int argc, const char** argv) {
             gen_params.height             = height;
             gen_params.batch_count        = n;
 
-            if (!sd_cpp_extra_args_str.empty() && !gen_params.from_json_str(sd_cpp_extra_args_str)) {
+            if (!extra_args_str.empty() && !gen_params.from_json_str(extra_args_str)) {
                 res.status = 400;
-                res.set_content(R"({"error":"invalid sd_cpp_extra_args"})", "application/json");
+                res.set_content(R"({"error":"invalid extra_args"})", "application/json");
                 return;
             }
 

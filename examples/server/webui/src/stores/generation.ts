@@ -92,26 +92,22 @@ export const useGenerationStore = defineStore('generation', () => {
     error.value = null
 
     try {
-      // Backend expects extra parameters embedded in the prompt string
-      const extraArgs = {
-        negative_prompt: params.negative_prompt,
-        sample_steps: params.steps,
-        cfg_scale: params.cfgScale,
-        sampling_method: params.sampler.toLowerCase().replace(' a', '_a').replace(/\+\+/g, 'pp'),
-        seed: params.seed,
-        width: params.width,
-        height: params.height,
-        save_image: params.saveImages,
-      };
-
-      const augmentedPrompt = `${params.prompt}<sd_cpp_extra_args>${JSON.stringify(extraArgs)}</sd_cpp_extra_args>`;
-
       const response = await fetch('/v1/images/generations', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ prompt: augmentedPrompt }),
+        body: JSON.stringify({
+          prompt: params.prompt,
+          negative_prompt: params.negative_prompt,
+          sample_steps: params.steps,
+          cfg_scale: params.cfgScale,
+          sampling_method: params.sampler.toLowerCase().replace(' a', '_a').replace(/\+\+/g, 'pp'),
+          seed: params.seed,
+          width: params.width,
+          height: params.height,
+          save_image: params.saveImages,
+        }),
       })
 
       if (!response.ok) {
