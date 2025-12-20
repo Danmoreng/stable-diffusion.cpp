@@ -254,6 +254,22 @@ async function sendToImg2Img() {
   }
 }
 
+async function upscaleActiveImage() {
+  const item = filteredImages.value[activeIndex.value]
+  if (!item) return
+
+  try {
+    await store.upscaleImage('', item.name)
+    // Refresh history to show the new upscaled image
+    await fetchImages()
+    // Find the new image and select it (it should be at the top)
+    activeIndex.value = 0
+    carouselInstance?.to(0)
+  } catch (err) {
+    console.error('Upscaling failed:', err)
+  }
+}
+
 onMounted(() => {
   fetchImages()
 })
@@ -316,6 +332,16 @@ onMounted(() => {
                 </small>
               </h5>
               <div class="ms-auto me-2 d-flex gap-2">
+                <button 
+                  v-if="store.upscaleModel"
+                  class="btn btn-outline-info btn-sm"
+                  @click="upscaleActiveImage"
+                  :disabled="store.isUpscaling"
+                >
+                  <i v-if="store.isUpscaling" class="spinner-border spinner-border-sm me-1"></i>
+                  <i v-else class="bi bi-box-arrow-up"></i> 
+                  Upscale
+                </button>
                 <button 
                   class="btn btn-outline-success btn-sm"
                   @click="sendToImg2Img"

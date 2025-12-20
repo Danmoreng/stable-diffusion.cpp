@@ -236,6 +236,47 @@ const clearInitImage = () => {
         </div>
       </div>
 
+      <!-- Hires-fix Section -->
+      <div v-if="mode === 'txt2img'" class="mb-4">
+        <div class="form-check form-switch mb-2">
+          <input class="form-check-input" type="checkbox" id="hiresFix" v-model="store.hiresFix">
+          <label class="form-check-label fw-bold" for="hiresFix">Highres-fix</label>
+        </div>
+        
+        <div v-if="store.hiresFix" class="hires-fix-container border-0 p-3 mt-2 mb-3 rounded">
+          <div class="row g-2 mb-2">
+            <div class="col-md-7">
+              <label for="hiresUpscaler" class="x-small text-muted mb-1 d-block text-uppercase fw-bold">Upscaler:</label>
+              <select id="hiresUpscaler" v-model="store.hiresUpscaleModel" class="form-select form-select-sm">
+                <option value="">None (Simple Resize)</option>
+                <option v-for="model in store.models.filter(m => m.type === 'esrgan')" :key="model.id" :value="model.id">
+                  {{ model.name }}
+                </option>
+              </select>
+            </div>
+            <div class="col-md-5">
+              <label for="hiresFactor" class="x-small text-muted mb-1 d-block text-uppercase fw-bold">Upscale by:</label>
+              <input type="number" id="hiresFactor" v-model.number="store.hiresUpscaleFactor" min="1" max="4" step="0.25" class="form-control form-control-sm">
+            </div>
+          </div>
+          
+          <div class="mb-2">
+            <label for="hiresDenoise" class="x-small text-muted mb-1 d-block text-uppercase fw-bold d-flex justify-content-between">
+              <span>Denoising Strength:</span>
+              <span class="text-primary">{{ store.hiresDenoisingStrength }}</span>
+            </label>
+            <input type="range" class="form-range" id="hiresDenoise" v-model.number="store.hiresDenoisingStrength" min="0" max="1" step="0.01">
+          </div>
+
+          <div class="row g-2">
+            <div class="col-md-12">
+              <label for="hiresSteps" class="x-small text-muted mb-1 d-block text-uppercase fw-bold">Hires Steps:</label>
+              <input type="number" id="hiresSteps" v-model.number="store.hiresSteps" min="1" max="150" class="form-control form-control-sm">
+            </div>
+          </div>
+        </div>
+      </div>
+
       <div class="d-grid">
         <button
           type="submit"
@@ -273,5 +314,17 @@ const clearInitImage = () => {
 [data-bs-theme="dark"] .image-upload-dropzone:hover {
   background-color: #373b3e !important;
   border-color: #3d8bfd !important;
+}
+
+.hires-fix-container {
+  background-color: #f8f9fa;
+}
+
+[data-bs-theme="dark"] .hires-fix-container {
+  background-color: #2b3035 !important;
+}
+
+.x-small {
+  font-size: 0.65rem;
 }
 </style>

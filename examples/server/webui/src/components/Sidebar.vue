@@ -78,7 +78,7 @@ const menuItems = [
     <div class="mb-4 px-1" v-if="!store.isSidebarCollapsed">
       <h6 class="mb-2 x-small text-uppercase fw-bold text-muted">Model</h6>
       <select 
-        class="form-select form-select-sm" 
+        class="form-select form-select-sm mb-2" 
         :value="store.currentModel" 
         @change="handleModelChange"
         :disabled="store.isModelSwitching || store.isGenerating"

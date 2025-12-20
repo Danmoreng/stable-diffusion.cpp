@@ -22,6 +22,7 @@ export const useGenerationStore = defineStore('generation', () => {
   const initialState = savedSettings ? { ...defaults, ...JSON.parse(savedSettings) } : defaults
 
   const isGenerating = ref(false)
+  const isUpscaling = ref(false)
   const isModelSwitching = ref(false)
   const imageUrls = ref<string[]>([])
   const error = ref<string | null>(null)
@@ -39,6 +40,17 @@ export const useGenerationStore = defineStore('generation', () => {
   const samplers = ref(['euler', 'euler_a', 'heun', 'dpm2', 'dpmpp_2s_a', 'dpmpp_2m', 'dpmpp_2mv2', 'ipndm', 'ipndm_v', 'lcm', 'ddim_trailing', 'tcd'])
   const width = ref(initialState.width)
   const height = ref(initialState.height)
+
+  // Highres-fix State
+  const hiresFix = ref(initialState.hiresFix || false)
+  const hiresUpscaleModel = ref(initialState.hiresUpscaleModel || '')
+  const hiresUpscaleFactor = ref(initialState.hiresUpscaleFactor || 2.0)
+  const hiresDenoisingStrength = ref(initialState.hiresDenoisingStrength || 0.5)
+  const hiresSteps = ref(initialState.hiresSteps || 20)
+
+  // Upscale State
+  const upscaleModel = ref('')
+  const upscaleFactor = ref(0)
 
   // Img2Img State
   const initImage = ref<string | null>(null)
@@ -228,6 +240,63 @@ export const useGenerationStore = defineStore('generation', () => {
     }
   }
 
+  async function loadUpscaleModel(modelId: string) {
+    isModelSwitching.value = true
+    try {
+      const response = await fetch('/v1/upscale/load', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model_id: modelId })
+      })
+      if (!response.ok) throw new Error('Failed to load upscale model')
+      upscaleModel.value = modelId
+      await fetchModels()
+    } catch (e: any) {
+      error.value = e.message
+    } finally {
+      isModelSwitching.value = false
+    }
+  }
+
+  async function upscaleImage(image: string, name?: string) {
+    isUpscaling.value = true
+    error.value = null
+    try {
+      const body: any = {
+        upscale_factor: upscaleFactor.value,
+        save_image: true
+      }
+      if (name) {
+        body.image_name = name
+      } else {
+        body.image = image
+      }
+
+      const response = await fetch('/v1/images/upscale', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      })
+
+      if (!response.ok) {
+        const err = await response.json()
+        throw new Error(err.error || 'Upscaling failed')
+      }
+
+      const data = await response.json()
+      const newImageUrl = `data:image/png;base64,${data.b64_json}`
+      
+      // If we are showing the upscaled image, maybe add it to the gallery
+      imageUrls.value = [newImageUrl]
+      return newImageUrl
+    } catch (e: any) {
+      error.value = e.message
+      throw e
+    } finally {
+      isUpscaling.value = false
+    }
+  }
+
   function toggleSidebar() {
     isSidebarCollapsed.value = !isSidebarCollapsed.value
   }
@@ -262,7 +331,7 @@ export const useGenerationStore = defineStore('generation', () => {
 
 
   // Watch for changes in settings and persist them to localStorage
-  watch([prompt, negativePrompt, steps, cfgScale, sampler, width, height, theme, saveImages, strength, batchCount], (newValues) => {
+  watch([prompt, negativePrompt, steps, cfgScale, sampler, width, height, theme, saveImages, strength, batchCount, hiresFix, hiresUpscaleModel, hiresUpscaleFactor, hiresDenoisingStrength, hiresSteps], (newValues) => {
     const settingsToSave = {
       prompt: newValues[0],
       negativePrompt: newValues[1],
@@ -275,6 +344,11 @@ export const useGenerationStore = defineStore('generation', () => {
       saveImages: newValues[8],
       strength: newValues[9],
       batchCount: newValues[10],
+      hiresFix: newValues[11],
+      hiresUpscaleModel: newValues[12],
+      hiresUpscaleFactor: newValues[13],
+      hiresDenoisingStrength: newValues[14],
+      hiresSteps: newValues[15],
     }
     localStorage.setItem('webui-settings', JSON.stringify(settingsToSave))
   }, { deep: true })
@@ -310,6 +384,11 @@ export const useGenerationStore = defineStore('generation', () => {
       width: params.width,
       height: params.height,
       save_image: params.saveImages,
+      hires_fix: hiresFix.value,
+      hires_upscale_model: hiresUpscaleModel.value,
+      hires_upscale_factor: hiresUpscaleFactor.value,
+      hires_denoising_strength: hiresDenoisingStrength.value,
+      hires_steps: hiresSteps.value,
     }
 
     if (params.initImage) {
@@ -435,5 +514,5 @@ export const useGenerationStore = defineStore('generation', () => {
     }
   }
 
-  return { isGenerating, isModelSwitching, imageUrls, error, generateImage, requestImage, parseA1111Parameters, prompt, negativePrompt, steps, seed, cfgScale, strength, batchCount, sampler, samplers, width, height, isSidebarCollapsed, toggleSidebar, theme, toggleTheme, saveImages, initImage, models, currentModel, isModelsLoading, fetchModels, loadModel, progressStep, progressSteps, progressTime, progressPhase, eta, startStreamingProgress, stopStreamingProgress, lastParams, outputDir, modelDir, updateConfig }
+  return { isGenerating, isUpscaling, isModelSwitching, imageUrls, error, generateImage, requestImage, upscaleImage, parseA1111Parameters, prompt, negativePrompt, steps, seed, cfgScale, strength, batchCount, sampler, samplers, width, height, hiresFix, hiresUpscaleModel, hiresUpscaleFactor, hiresDenoisingStrength, hiresSteps, isSidebarCollapsed, toggleSidebar, theme, toggleTheme, saveImages, initImage, models, currentModel, upscaleModel, upscaleFactor, isModelsLoading, fetchModels, loadModel, loadUpscaleModel, progressStep, progressSteps, progressTime, progressPhase, eta, startStreamingProgress, stopStreamingProgress, lastParams, outputDir, modelDir, updateConfig }
 })

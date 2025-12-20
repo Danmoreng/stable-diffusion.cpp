@@ -1015,6 +1015,13 @@ struct SDGenerationParams {
     std::string pm_id_embed_path;
     float pm_style_strength = 20.f;
 
+    // Highres-fix
+    bool hires_fix = false;
+    std::string hires_upscale_model;
+    float hires_upscale_factor = 2.0f;
+    float hires_denoising_strength = 0.5f;
+    int hires_steps = 20;
+
     int upscale_repeats   = 1;
     int upscale_tile_size = 128;
 
@@ -1457,7 +1464,7 @@ struct SDGenerationParams {
                         out = j[key];
                 } else if constexpr (std::is_same_v<T, float>) {
                     if (j[key].is_number())
-                        out = j[key];
+                        out = j[key].get<float>();
                 } else if constexpr (std::is_same_v<T, bool>) {
                     if (j[key].is_boolean())
                         out = j[key];
@@ -1496,6 +1503,12 @@ struct SDGenerationParams {
         load_if_exists("fps", fps);
         load_if_exists("upscale_repeats", upscale_repeats);
         load_if_exists("seed", seed);
+
+        load_if_exists("hires_fix", hires_fix);
+        load_if_exists("hires_upscale_model", hires_upscale_model);
+        load_if_exists("hires_upscale_factor", hires_upscale_factor);
+        load_if_exists("hires_denoising_strength", hires_denoising_strength);
+        load_if_exists("hires_steps", hires_steps);
 
         load_if_exists("strength", strength);
         load_if_exists("control_strength", control_strength);
@@ -1801,6 +1814,11 @@ struct SDGenerationParams {
             << "  strength: " << strength << ",\n"
             << "  control_strength: " << control_strength << ",\n"
             << "  seed: " << seed << ",\n"
+            << "  hires_fix: " << (hires_fix ? "true" : "false") << ",\n"
+            << "  hires_upscale_model: \"" << hires_upscale_model << "\",\n"
+            << "  hires_upscale_factor: " << hires_upscale_factor << ",\n"
+            << "  hires_denoising_strength: " << hires_denoising_strength << ",\n"
+            << "  hires_steps: " << hires_steps << ",\n"
             << "  upscale_repeats: " << upscale_repeats << ",\n"
             << "  upscale_tile_size: " << upscale_tile_size << ",\n"
             << "}";

@@ -15,7 +15,7 @@
 
 namespace fs = std::filesystem;
 
-// ----------------------- helpers -----------------------
+// ----------------------- helpers ----------------------- 
 
 struct ProgressState {
     int step = 0;
@@ -148,7 +148,7 @@ static std::string get_image_params(const SDContextParams& ctx_params, const SDG
     return parameter_string;
 }
 
-static const std::string base64_chars =
+static const std::string base64_chars = 
 
 
     "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
@@ -512,6 +512,8 @@ int main(int argc, const char** argv) {
 
     sd_ctx_params_t sd_ctx_params = ctx_params.to_sd_ctx_params_t(false, false, false);
     sd_ctx_t* sd_ctx              = nullptr;
+    upscaler_ctx_t* upscaler_ctx  = nullptr;
+    std::string current_upscale_model_path;
     
     if (!ctx_params.model_path.empty() || !ctx_params.diffusion_model_path.empty()) {
         sd_ctx = new_sd_ctx(&sd_ctx_params);
@@ -693,7 +695,7 @@ int main(int argc, const char** argv) {
                 for (const auto& entry : fs::recursive_directory_iterator(base_path)) {
                     if (entry.is_regular_file()) {
                         auto ext = entry.path().extension().string();
-                        if (ext == ".gguf" || ext == ".safetensors" || ext == ".ckpt") {
+                        if (ext == ".gguf" || ext == ".safetensors" || ext == ".ckpt" || ext == ".pth") {
                             json model;
                             // Use relative path from model_dir as ID for easy loading
                             std::string rel_path = fs::relative(entry.path(), svr_params.model_dir).string();
@@ -704,7 +706,7 @@ int main(int argc, const char** argv) {
                             model["type"] = sub_dir;
                             model["object"] = "model";
                             model["owned_by"] = "local";
-                            model["active"] = (model["name"] == current_model_name);
+                            model["active"] = (model["id"] == current_model_name || rel_path == current_upscale_model_path);
                             r["data"].push_back(model);
                         }
                     }
@@ -804,6 +806,173 @@ int main(int argc, const char** argv) {
 
         } catch (const std::exception& e) {
             LOG_ERROR("error loading model: %s", e.what());
+            res.status = 500;
+            res.set_content(R"({"error":")" + std::string(e.what()) + R"("})", "application/json");
+        }
+    });
+
+    svr.Post("/v1/upscale/load", [&](const httplib::Request& req, httplib::Response& res) {
+        try {
+            json body = json::parse(req.body);
+            if (!body.contains("model_id")) {
+                res.status = 400;
+                res.set_content(R"({"error":"model_id required"})", "application/json");
+                return;
+            }
+            std::string model_id = body["model_id"];
+            fs::path model_path = fs::path(svr_params.model_dir) / model_id;
+            
+            if (!fs::exists(model_path)) {
+                res.status = 404;
+                res.set_content(R"({"error":"upscale model not found"})", "application/json");
+                return;
+            }
+
+            LOG_INFO("Loading upscale model: %s", model_path.string().c_str());
+
+            {
+                std::lock_guard<std::mutex> lock(sd_ctx_mutex);
+                if (upscaler_ctx) {
+                    free_upscaler_ctx(upscaler_ctx);
+                    upscaler_ctx = nullptr;
+                }
+
+                upscaler_ctx = new_upscaler_ctx(model_path.string().c_str(), 
+                                                ctx_params.offload_params_to_cpu,
+                                                false, // direct
+                                                ctx_params.n_threads,
+                                                512); // tile_size
+
+                if (!upscaler_ctx) {
+                    throw std::runtime_error("failed to create upscaler context");
+                }
+                current_upscale_model_path = model_id;
+            }
+
+            res.set_content(R"({"status":"success","model":")" + model_id + R"("})", "application/json");
+        } catch (const std::exception& e) {
+            LOG_ERROR("error loading upscale model: %s", e.what());
+            res.status = 500;
+            res.set_content(R"({"error":")" + std::string(e.what()) + R"("})", "application/json");
+        }
+    });
+
+    svr.Post("/v1/images/upscale", [&](const httplib::Request& req, httplib::Response& res) {
+        try {
+            json body = json::parse(req.body);
+            std::string image_data;
+            std::string image_name;
+
+            if (body.contains("image")) {
+                image_data = body["image"];
+                if (image_data.find("base64,") != std::string::npos) {
+                    image_data = image_data.substr(image_data.find("base64,") + 7);
+                }
+            } else if (body.contains("image_name")) {
+                image_name = body["image_name"];
+                fs::path img_path = fs::path(svr_params.output_dir) / image_name;
+                if (!fs::exists(img_path)) {
+                    res.status = 404;
+                    res.set_content(R"({"error":"image not found"})", "application/json");
+                    return;
+                }
+                std::ifstream ifs(img_path, std::ios::binary);
+                image_data = std::string((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+                // This is raw bytes, not base64 if read from file like this in my logic, 
+                // but load_image_from_memory expects raw bytes.
+            } else {
+                res.status = 400;
+                res.set_content(R"({"error":"image (base64) or image_name required"})", "application/json");
+                return;
+            }
+
+            uint32_t upscale_factor = body.value("upscale_factor", 0);
+
+            sd_image_t input_image = {0, 0, 3, nullptr};
+            std::vector<uint8_t> decoded_bytes;
+            
+            if (!image_name.empty()) {
+                // image_data contains raw bytes
+                int w, h;
+                input_image.data = load_image_from_memory(image_data.data(), image_data.size(), w, h, 0, 0, 3);
+                input_image.width = w;
+                input_image.height = h;
+            } else {
+                decoded_bytes = base64_decode(image_data);
+                int w, h;
+                input_image.data = load_image_from_memory((const char*)decoded_bytes.data(), decoded_bytes.size(), w, h, 0, 0, 3);
+                input_image.width = w;
+                input_image.height = h;
+            }
+
+            if (!input_image.data) {
+                res.status = 400;
+                res.set_content(R"({"error":"failed to decode image"})", "application/json");
+                return;
+            }
+
+            sd_image_t upscaled_image = {0};
+            {
+                std::lock_guard<std::mutex> lock(sd_ctx_mutex);
+                if (!upscaler_ctx) {
+                    stbi_image_free(input_image.data);
+                    res.status = 400;
+                    res.set_content(R"({"error":"no upscale model loaded"})", "application/json");
+                    return;
+                }
+                
+                if (upscale_factor == 0) {
+                    upscale_factor = get_upscale_factor(upscaler_ctx);
+                }
+
+                LOG_INFO("Upscaling image: %dx%d -> factor %d", input_image.width, input_image.height, upscale_factor);
+                upscaled_image = upscale(upscaler_ctx, input_image, upscale_factor);
+            }
+
+            stbi_image_free(input_image.data);
+
+            if (!upscaled_image.data) {
+                res.status = 500;
+                res.set_content(R"({"error":"upscaling failed"})", "application/json");
+                return;
+            }
+
+            auto image_bytes = write_image_to_vector(ImageFormat::PNG,
+                                                     upscaled_image.data,
+                                                     upscaled_image.width,
+                                                     upscaled_image.height,
+                                                     upscaled_image.channel);
+            
+            free(upscaled_image.data);
+
+            if (image_bytes.empty()) {
+                res.status = 500;
+                res.set_content(R"({"error":"failed to encode upscaled image"})", "application/json");
+                return;
+            }
+
+            std::string b64 = base64_encode(image_bytes);
+            json out;
+            out["width"] = upscaled_image.width;
+            out["height"] = upscaled_image.height;
+            out["b64_json"] = b64;
+
+            // Optionally save to output_dir
+            if (body.value("save_image", true)) {
+                auto timestamp = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+                std::string out_name = "upscale-" + std::to_string(timestamp) + ".png";
+                fs::path out_path = fs::path(svr_params.output_dir) / out_name;
+                std::ofstream ofs(out_path, std::ios::binary);
+                ofs.write((const char*)image_bytes.data(), image_bytes.size());
+                out["url"] = "/outputs/" + out_name;
+                out["name"] = out_name;
+                LOG_INFO("Saved upscaled image to %s", out_path.string().c_str());
+            }
+
+            res.set_content(out.dump(), "application/json");
+
+        } catch (const std::exception& e) {
+            LOG_ERROR("error during upscaling: %s", e.what());
             res.status = 500;
             res.set_content(R"({"error":")" + std::string(e.what()) + R"("})", "application/json");
         }
@@ -1034,6 +1203,121 @@ int main(int argc, const char** argv) {
                 set_progress_phase("Sampling...");
                 results     = generate_image(sd_ctx, &img_gen_params);
                 num_results = gen_params.batch_count;
+
+                LOG_INFO("Generation done, num_results: %d, hires_fix: %s", num_results, gen_params.hires_fix ? "true" : "false");
+
+                // --- Highres-fix Logic ---
+                if (gen_params.hires_fix && num_results > 0) {
+                    LOG_INFO("Performing highres-fix for %d images...", num_results);
+                    
+                    // 1. Load Upscaler if needed
+                    if (!gen_params.hires_upscale_model.empty() && 
+                        current_upscale_model_path != gen_params.hires_upscale_model) {
+                        
+                        fs::path upscaler_path = fs::path(svr_params.model_dir) / gen_params.hires_upscale_model;
+                        LOG_INFO("Attempting to load upscaler: %s", upscaler_path.string().c_str());
+                        if (fs::exists(upscaler_path)) {
+                            if (upscaler_ctx) free_upscaler_ctx(upscaler_ctx);
+                            upscaler_ctx = new_upscaler_ctx(upscaler_path.string().c_str(), 
+                                                           ctx_params.offload_params_to_cpu,
+                                                           false, ctx_params.n_threads, 512);
+                            current_upscale_model_path = gen_params.hires_upscale_model;
+                            LOG_INFO("Upscaler loaded successfully.");
+                        } else {
+                            LOG_WARN("Upscaler model not found: %s", upscaler_path.string().c_str());
+                        }
+                    }
+
+                    sd_image_t* hires_results = (sd_image_t*)malloc(sizeof(sd_image_t) * num_results);
+                    
+                    for (int i = 0; i < num_results; i++) {
+                        sd_image_t base_img = results[i];
+                        sd_image_t upscaled_img = {0};
+
+                        // 2. Upscale
+                        if (upscaler_ctx) {
+                            LOG_INFO("Upscaling for highres-fix (factor %.2f)...", gen_params.hires_upscale_factor);
+                            upscaled_img = upscale(upscaler_ctx, base_img, (uint32_t)gen_params.hires_upscale_factor);
+                        } else {
+                            // Simple bicubic/bilinear resize fallback if no upscaler
+                            LOG_INFO("Resizing for highres-fix (factor %.2f) using simple resize...", gen_params.hires_upscale_factor);
+                            upscaled_img.width = (uint32_t)(base_img.width * gen_params.hires_upscale_factor);
+                            upscaled_img.height = (uint32_t)(base_img.height * gen_params.hires_upscale_factor);
+                            upscaled_img.channel = base_img.channel;
+                            upscaled_img.data = (uint8_t*)malloc(upscaled_img.width * upscaled_img.height * upscaled_img.channel);
+                            stbir_resize_uint8(base_img.data, base_img.width, base_img.height, 0,
+                                               upscaled_img.data, upscaled_img.width, upscaled_img.height, 0,
+                                               upscaled_img.channel);
+                        }
+
+                        // 3. Second Pass (Img2Img)
+                        set_progress_phase("Highres-fix Pass...");
+                        
+                        uint32_t target_width = (uint32_t)(base_img.width * gen_params.hires_upscale_factor);
+                        uint32_t target_height = (uint32_t)(base_img.height * gen_params.hires_upscale_factor);
+
+                        // If upscaler gave us a different size than requested, resize it
+                        if (upscaled_img.width != target_width || upscaled_img.height != target_height) {
+                            LOG_INFO("Resizing upscaled image to target size: %dx%d", target_width, target_height);
+                            sd_image_t resized_img = { target_width, target_height, upscaled_img.channel, nullptr };
+                            resized_img.data = (uint8_t*)malloc(target_width * target_height * resized_img.channel);
+                            stbir_resize_uint8(upscaled_img.data, upscaled_img.width, upscaled_img.height, 0,
+                                               resized_img.data, target_width, target_height, 0,
+                                               resized_img.channel);
+                            free(upscaled_img.data);
+                            upscaled_img = resized_img;
+                        }
+
+                        sd_img_gen_params_t hires_params = img_gen_params;
+                        hires_params.init_image = upscaled_img;
+                        hires_params.width = upscaled_img.width;
+                        hires_params.height = upscaled_img.height;
+                        hires_params.strength = gen_params.hires_denoising_strength;
+                        hires_params.sample_params.sample_steps = gen_params.hires_steps;
+                        hires_params.batch_count = 1;
+
+                        // Re-create mask and control image at new size to avoid assertion failure
+                        hires_params.mask_image.width = target_width;
+                        hires_params.mask_image.height = target_height;
+                        hires_params.mask_image.data = (uint8_t*)malloc(target_width * target_height * hires_params.mask_image.channel);
+                        if (img_gen_params.mask_image.data) {
+                            stbir_resize_uint8(img_gen_params.mask_image.data, img_gen_params.mask_image.width, img_gen_params.mask_image.height, 0,
+                                               hires_params.mask_image.data, target_width, target_height, 0,
+                                               hires_params.mask_image.channel);
+                        } else {
+                            memset(hires_params.mask_image.data, 255, target_width * target_height * hires_params.mask_image.channel);
+                        }
+
+                        hires_params.control_image.width = target_width;
+                        hires_params.control_image.height = target_height;
+                        hires_params.control_image.data = (uint8_t*)calloc(1, target_width * target_height * hires_params.control_image.channel);
+                        if (img_gen_params.control_image.data) {
+                            stbir_resize_uint8(img_gen_params.control_image.data, img_gen_params.control_image.width, img_gen_params.control_image.height, 0,
+                                               hires_params.control_image.data, target_width, target_height, 0,
+                                               hires_params.control_image.channel);
+                        }
+
+                        sd_image_t* second_pass_result = generate_image(sd_ctx, &hires_params);
+                        
+                        if (second_pass_result && second_pass_result[0].data) {
+                            hires_results[i] = second_pass_result[0];
+                            free(second_pass_result); // Free the container, not the data
+                        } else {
+                            hires_results[i] = upscaled_img; // Fallback to upscaled if second pass fails
+                        }
+
+                        // Cleanup intermediate images
+                        stbi_image_free(base_img.data);
+                        if (upscaled_img.data && upscaled_img.data != hires_results[i].data) {
+                            free(upscaled_img.data);
+                        }
+                        free(hires_params.mask_image.data);
+                        free(hires_params.control_image.data);
+                    }
+                    
+                    free(results);
+                    results = hires_results;
+                }
             }
 
             set_progress_phase("VAE Decoding...");
@@ -1345,5 +1629,8 @@ int main(int argc, const char** argv) {
 
     // cleanup
     free_sd_ctx(sd_ctx);
+    if (upscaler_ctx) {
+        free_upscaler_ctx(upscaler_ctx);
+    }
     return 0;
 }
