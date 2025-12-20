@@ -256,6 +256,7 @@ struct SDSvrParams {
     std::string listen_ip = "127.0.0.1";
     int listen_port       = 1234;
     std::string model_dir = "./models";
+    std::string output_dir = "./outputs";
     bool normal_exit      = false;
     bool verbose          = false;
     bool color            = false;
@@ -272,7 +273,12 @@ struct SDSvrParams {
              "",
              "--model-dir",
              "directory to scan for models (default: ./models)",
-             &model_dir}};
+             &model_dir},
+            {
+             "",
+             "--output-dir",
+             "directory to save generated images (default: ./outputs)",
+             &output_dir}};
 
         options.int_options = {
             {
@@ -469,10 +475,27 @@ int main(int argc, const char** argv) {
 
     httplib::Server svr;
 
-    // Mount the outputs directory to serve generated images
-    if (!svr.set_mount_point("/outputs", "./outputs")) {
-        LOG_WARN("failed to mount ./outputs directory, will not serve history images");
-    }
+    // Dynamic handler for outputs to allow changing directory at runtime
+    svr.Get(R"(/outputs/(.*))", [&](const httplib::Request& req, httplib::Response& res) {
+        std::string file_name = req.matches[1];
+        fs::path file_path = fs::path(svr_params.output_dir) / file_name;
+
+        if (fs::exists(file_path) && fs::is_regular_file(file_path)) {
+            std::ifstream ifs(file_path, std::ios::binary);
+            std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+            
+            std::string ext = file_path.extension().string();
+            std::string mime = "application/octet-stream";
+            if (ext == ".png") mime = "image/png";
+            else if (ext == ".jpg" || ext == ".jpeg") mime = "image/jpeg";
+            else if (ext == ".json") mime = "application/json";
+            
+            res.set_content(content, mime.c_str());
+        } else {
+            res.status = 404;
+        }
+    });
+
     // Mount a directory to serve static files (our web UI)
     if (!svr.set_mount_point("/", "./public")) {
         LOG_WARN("failed to mount ./public directory, will not serve static files");
@@ -496,8 +519,30 @@ int main(int argc, const char** argv) {
     });
 
     // health
-    svr.Get("/", [&](const httplib::Request&, httplib::Response& res) {
+    svr.Get("/health", [&](const httplib::Request&, httplib::Response& res) {
         res.set_content(R"({"ok":true,"service":"sd-cpp-http"})", "application/json");
+    });
+
+    // config endpoint
+    svr.Get("/v1/config", [&](const httplib::Request&, httplib::Response& res) {
+        json c;
+        c["output_dir"] = svr_params.output_dir;
+        c["model_dir"] = svr_params.model_dir;
+        res.set_content(c.dump(), "application/json");
+    });
+
+    svr.Post("/v1/config", [&](const httplib::Request& req, httplib::Response& res) {
+        try {
+            json body = json::parse(req.body);
+            if (body.contains("output_dir")) {
+                svr_params.output_dir = body["output_dir"];
+                LOG_INFO("Config updated: output_dir = %s", svr_params.output_dir.c_str());
+            }
+            res.set_content(R"({"status":"success"})", "application/json");
+        } catch (const std::exception& e) {
+            res.status = 400;
+            res.set_content(R"({"error":"invalid json"})", "application/json");
+        }
     });
 
     svr.Get("/v1/progress", [&](const httplib::Request&, httplib::Response& res) {
@@ -707,7 +752,7 @@ int main(int argc, const char** argv) {
 
     // image history endpoint
     svr.Get("/v1/history/images", [&](const httplib::Request&, httplib::Response& res) {
-        const std::string output_dir = "outputs";
+        const std::string output_dir = svr_params.output_dir;
         json image_list = json::array();
         try {
             if (fs::exists(output_dir) && fs::is_directory(output_dir)) {
@@ -936,9 +981,9 @@ int main(int argc, const char** argv) {
 
                 if (save_image) {
                     try {
-                        const std::string output_dir = "outputs";
+                        const std::string output_dir = svr_params.output_dir;
                         if (!fs::exists(output_dir)) {
-                            fs::create_directory(output_dir);
+                            fs::create_directories(output_dir);
                         }
                         // a timestamp in microseconds + seed should be unique enough
                         auto timestamp = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now().time_since_epoch()).count();

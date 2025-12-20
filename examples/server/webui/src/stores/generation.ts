@@ -47,11 +47,36 @@ export const useGenerationStore = defineStore('generation', () => {
   const isSidebarCollapsed = ref(localStorage.getItem('sidebar-collapsed') === 'true')
   const theme = ref(initialState.theme as 'light' | 'dark' | 'system')
   const saveImages = ref(initialState.saveImages)
+  const outputDir = ref('outputs')
 
   // Model Management State
   const models = ref<any[]>([])
   const currentModel = ref<string>('')
   const isModelsLoading = ref(false)
+
+  async function fetchConfig() {
+    try {
+      const response = await fetch('/v1/config')
+      const data = await response.json()
+      if (data.output_dir) {
+        outputDir.value = data.output_dir
+      }
+    } catch (e) {
+      console.error('Failed to fetch config:', e)
+    }
+  }
+
+  async function updateConfig() {
+    try {
+      await fetch('/v1/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ output_dir: outputDir.value })
+      })
+    } catch (e) {
+      console.error('Failed to update config:', e)
+    }
+  }
 
   // Watch for sidebar changes and persist
   watch(isSidebarCollapsed, (newVal) => {
@@ -161,6 +186,7 @@ export const useGenerationStore = defineStore('generation', () => {
 
   async function fetchModels() {
     isModelsLoading.value = true
+    fetchConfig() // Also fetch server config
     try {
       const response = await fetch('/v1/models')
       const data = await response.json()
@@ -324,5 +350,5 @@ export const useGenerationStore = defineStore('generation', () => {
     }
   }
 
-  return { isGenerating, isModelSwitching, imageUrls, error, generateImage, requestImage, prompt, negativePrompt, steps, seed, cfgScale, strength, batchCount, sampler, samplers, width, height, isSidebarCollapsed, toggleSidebar, theme, toggleTheme, saveImages, initImage, models, currentModel, isModelsLoading, fetchModels, loadModel, progressStep, progressSteps, progressTime, progressPhase, eta, startStreamingProgress, stopStreamingProgress, lastParams }
+  return { isGenerating, isModelSwitching, imageUrls, error, generateImage, requestImage, prompt, negativePrompt, steps, seed, cfgScale, strength, batchCount, sampler, samplers, width, height, isSidebarCollapsed, toggleSidebar, theme, toggleTheme, saveImages, initImage, models, currentModel, isModelsLoading, fetchModels, loadModel, progressStep, progressSteps, progressTime, progressPhase, eta, startStreamingProgress, stopStreamingProgress, lastParams, outputDir, updateConfig }
 })

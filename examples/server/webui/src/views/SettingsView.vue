@@ -21,11 +21,34 @@ const store = useGenerationStore()
       </div>
       <div class="col-md-6">
         <h5>Image Generation</h5>
-        <div class="form-check form-switch">
+        <div class="form-check form-switch mb-3">
           <input class="form-check-input" type="checkbox" role="switch" id="saveImages" v-model="store.saveImages">
           <label class="form-check-label" for="saveImages">Save Images Automatically</label>
+        </div>
+        
+        <div class="mb-3">
+          <label for="outputDir" class="form-label small fw-bold text-muted">Output Directory</label>
+          <div class="input-group input-group-sm">
+            <input 
+              type="text" 
+              id="outputDir" 
+              class="form-control" 
+              v-model="store.outputDir" 
+              placeholder="./outputs"
+            >
+            <button class="btn btn-primary" type="button" @click="store.updateConfig">
+              <i class="bi bi-save"></i> Save Path
+            </button>
+          </div>
+          <div class="form-text x-small">Path on the server where images will be saved and loaded from.</div>
         </div>
       </div>
     </div>
   </div>
 </template>
+
+<style scoped>
+.x-small {
+  font-size: 0.75rem;
+}
+</style>
