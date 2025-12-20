@@ -287,7 +287,7 @@ onMounted(() => {
       {{ error }}
     </div>
     <div v-else-if="images.length === 0" class="text-center text-muted my-5">
-      <i class="bi bi-image-fill display-1"></i>
+      🖼️
       <p class="mt-3">No images found in history.</p>
       <p>Generate some images with the "Save Images Automatically" setting enabled.</p>
     </div>
@@ -304,7 +304,7 @@ onMounted(() => {
                 <span class="fw-bold text-primary">#{{ image.params?.seed || '?' }}</span>
               </div>
               <div v-if="image.params?.model" class="text-truncate text-secondary opacity-75" :title="image.params.model">
-                <i class="bi bi-box small"></i> {{ image.params.model }}
+                📦 {{ image.params.model }}
               </div>
             </div>
           </div>
@@ -313,7 +313,7 @@ onMounted(() => {
       
       <!-- No Results -->
       <div v-else class="text-center my-5 text-muted">
-        <i class="bi bi-search display-4"></i>
+        🔍
         <p class="mt-2">No images match your current filters.</p>
         <button class="btn btn-sm btn-link" @click="selectedModel = 'all'; selectedDateRange = 'all'; startDate = ''; endDate = ''">Reset Filters</button>
       </div>
@@ -339,21 +339,21 @@ onMounted(() => {
                   :disabled="store.isUpscaling"
                 >
                   <i v-if="store.isUpscaling" class="spinner-border spinner-border-sm me-1"></i>
-                  <i v-else class="bi bi-box-arrow-up"></i> 
+                  <span v-else>⬆️</span>
                   Upscale
                 </button>
                 <button 
                   class="btn btn-outline-success btn-sm"
                   @click="sendToImg2Img"
                 >
-                  <i class="bi bi-image"></i> Send to Img2Img
+                  🖼️ Send to Img2Img
                 </button>
                 <button 
                   v-if="filteredImages[activeIndex]?.params" 
                   class="btn btn-outline-primary btn-sm"
                   @click="reuseParameters(true)"
                 >
-                  <i class="bi bi-arrow-repeat"></i> Reuse Parameters
+                  ♻️ Reuse Parameters
                 </button>
               </div>
               <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
@@ -393,7 +393,7 @@ onMounted(() => {
                     <div class="d-flex justify-content-between align-items-center mb-1">
                       <strong>Forge Format:</strong>
                       <button class="btn btn-link btn-sm p-0 text-decoration-none x-small" @click="copyToClipboard(getFormattedParams(filteredImages[activeIndex]))">
-                        <i class="bi bi-clipboard"></i> Copy
+                        📋 Copy
                       </button>
                     </div>
                     <pre class="bg-dark bg-opacity-10 p-2 rounded x-small mb-0 text-break-all white-space-pre-wrap">{{ getFormattedParams(filteredImages[activeIndex]) }}</pre>

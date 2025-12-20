@@ -43,10 +43,6 @@ function sendToImg2Img(url: string) {
 
 <template>
   <div class="card shadow-sm h-100 border-0">
-    <div class="card-header bg-transparent border-0 pt-3 px-3">
-      <h5 class="card-title mb-0">Result</h5>
-    </div>
-    
     <div class="card-body d-flex flex-column p-3">
       <div class="image-display-container flex-grow-1 mb-3">
         <!-- Loading State -->
@@ -103,7 +99,7 @@ function sendToImg2Img(url: string) {
             </div>
             <div class="py-3 w-100 text-center border-top mt-3 bg-body-tertiary rounded-bottom">
               <button class="btn btn-sm btn-outline-success px-4" @click="sendToImg2Img(url)">
-                <i class="bi bi-image"></i> Send to Img2Img
+                🖼️ Send to Img2Img
               </button>
             </div>
           </div>
@@ -144,7 +140,7 @@ function sendToImg2Img(url: string) {
           <div class="d-flex justify-content-between align-items-center mb-1">
             <span class="fw-bold text-muted text-uppercase x-small">A1111 / Forge Format</span>
             <button class="btn btn-link btn-sm p-0 text-decoration-none x-small" @click="copyParameters">
-              <i class="bi bi-clipboard"></i> Copy
+              📋 Copy
             </button>
           </div>
           <pre class="bg-dark bg-opacity-25 p-2 rounded x-small mb-0 text-break-all white-space-pre-wrap">{{ parametersString }}</pre>

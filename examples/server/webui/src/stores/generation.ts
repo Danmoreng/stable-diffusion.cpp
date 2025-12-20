@@ -414,7 +414,28 @@ export const useGenerationStore = defineStore('generation', () => {
       throw new Error('Server response did not contain image data.');
     }
     
+    // Update seed with the actual one used from the first image
+    if (responseData.data[0].seed) {
+        lastParams.value.seed = responseData.data[0].seed
+    }
+
     return responseData.data.map((item: any) => `data:image/png;base64,${item.b64_json}`);
+  }
+
+  function reuseLastSeed() {
+    if (lastParams.value) {
+        seed.value = lastParams.value.seed
+    }
+  }
+
+  function randomizeSeed() {
+    seed.value = -1
+  }
+
+  function swapDimensions() {
+    const temp = width.value
+    width.value = height.value
+    height.value = temp
   }
 
   function parseA1111Parameters(text: string) {
@@ -514,5 +535,5 @@ export const useGenerationStore = defineStore('generation', () => {
     }
   }
 
-  return { isGenerating, isUpscaling, isModelSwitching, imageUrls, error, generateImage, requestImage, upscaleImage, parseA1111Parameters, prompt, negativePrompt, steps, seed, cfgScale, strength, batchCount, sampler, samplers, width, height, hiresFix, hiresUpscaleModel, hiresUpscaleFactor, hiresDenoisingStrength, hiresSteps, isSidebarCollapsed, toggleSidebar, theme, toggleTheme, saveImages, initImage, models, currentModel, upscaleModel, upscaleFactor, isModelsLoading, fetchModels, loadModel, loadUpscaleModel, progressStep, progressSteps, progressTime, progressPhase, eta, startStreamingProgress, stopStreamingProgress, lastParams, outputDir, modelDir, updateConfig }
+  return { isGenerating, isUpscaling, isModelSwitching, imageUrls, error, generateImage, requestImage, upscaleImage, parseA1111Parameters, prompt, negativePrompt, steps, seed, cfgScale, strength, batchCount, sampler, samplers, width, height, hiresFix, hiresUpscaleModel, hiresUpscaleFactor, hiresDenoisingStrength, hiresSteps, isSidebarCollapsed, toggleSidebar, theme, toggleTheme, saveImages, initImage, models, currentModel, upscaleModel, upscaleFactor, isModelsLoading, fetchModels, loadModel, loadUpscaleModel, progressStep, progressSteps, progressTime, progressPhase, eta, startStreamingProgress, stopStreamingProgress, lastParams, outputDir, modelDir, updateConfig, reuseLastSeed, randomizeSeed, swapDimensions }
 })

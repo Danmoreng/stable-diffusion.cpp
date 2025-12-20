@@ -75,15 +75,12 @@ const clearInitImage = () => {
 
 <template>
   <div class="card shadow-sm p-3">
-    <h5 class="card-title mb-4">
-      {{ mode === 'txt2img' ? 'Text-to-Image' : 'Image-to-Image' }}
-    </h5>
     <form @submit.prevent="n">
       <!-- Img2Img Upload -->
       <div class="mb-3" v-if="mode === 'img2img'">
         <label class="form-label">Initial Image:</label>
         <div v-if="!store.initImage" class="image-upload-dropzone border rounded p-4 text-center" @click="$refs.fileInput.click()">
-          <i class="bi bi-cloud-arrow-up display-6"></i>
+          <span class="display-6">📁</span>
           <p class="mb-0 mt-2">Click to upload or drag & drop</p>
           <input type="file" ref="fileInput" class="d-none" accept="image/*" @change="onFileChange" />
         </div>
@@ -91,13 +88,13 @@ const clearInitImage = () => {
           <img :src="store.initImage" class="img-thumbnail" style="max-height: 200px;" />
           <div class="mt-2 d-flex justify-content-center flex-wrap gap-2">
             <button type="button" class="btn btn-outline-secondary btn-sm" @click="useImageSize">
-              <i class="bi bi-aspect-ratio"></i> Use Size ({{ uploadedImageWidth }}x{{ uploadedImageHeight }})
+              📏 Use Size ({{ uploadedImageWidth }}x{{ uploadedImageHeight }})
             </button>
             <button type="button" class="btn btn-outline-info btn-sm" @click="scale2x">
-              <i class="bi bi-zoom-in"></i> Scale 2x
+              🔍 Scale 2x
             </button>
             <button type="button" class="btn btn-danger btn-sm" @click="clearInitImage">
-              <i class="bi bi-trash"></i> Clear
+              🗑️ Clear
             </button>
           </div>
         </div>
@@ -123,7 +120,7 @@ const clearInitImage = () => {
             style="font-size: 0.75rem;"
             @click="store.parseA1111Parameters(store.prompt)"
           >
-            <i class="bi bi-magic"></i> Apply Forge Parameters
+            ✨ Apply Forge Parameters
           </button>
         </div>
         <textarea
@@ -147,92 +144,110 @@ const clearInitImage = () => {
         ></textarea>
       </div>
 
-      <div class="row g-3 mb-3">
+      <div class="row g-2 mb-3">
         <div class="col-md-4">
-          <label for="steps" class="form-label">Steps:</label>
-          <input
-            type="number"
-            id="steps"
-            v-model.number="store.steps"
-            min="1"
-            max="150"
-            class="form-control"
-          />
+          <div class="input-group input-group-sm">
+            <span class="input-group-text">Steps</span>
+            <input
+              type="number"
+              v-model.number="store.steps"
+              min="1"
+              max="150"
+              class="form-control"
+            />
+          </div>
         </div>
         <div class="col-md-4">
-          <label for="batchCount" class="form-label">Batch Count:</label>
-          <input
-            type="number"
-            id="batchCount"
-            v-model.number="store.batchCount"
-            min="1"
-            max="8"
-            class="form-control"
-          />
+          <div class="input-group input-group-sm">
+            <span class="input-group-text">Batch</span>
+            <input
+              type="number"
+              v-model.number="store.batchCount"
+              min="1"
+              max="8"
+              class="form-control"
+            />
+          </div>
         </div>
         <div class="col-md-4">
-          <label for="seed" class="form-label">Seed:</label>
-          <input
-            type="number"
-            id="seed"
-            v-model.number="store.seed"
-            class="form-control"
-          />
+          <div class="input-group input-group-sm">
+            <span class="input-group-text">Seed</span>
+            <input
+                type="number"
+                v-model.number="store.seed"
+                class="form-control"
+            />
+            <button type="button" class="btn btn-outline-secondary" @click="store.reuseLastSeed" title="Reuse Last Seed" :disabled="!store.lastParams">
+                ♻️
+            </button>
+            <button type="button" class="btn btn-outline-secondary" @click="store.randomizeSeed" title="Randomize Seed">
+                🎲
+            </button>
+          </div>
         </div>
       </div>
 
-      <div class="row g-3 mb-3">
-        <div class="col-md-6">
-          <label for="width" class="form-label">Width:</label>
-          <input
-            type="number"
-            id="width"
-            v-model.number="store.width"
-            min="64"
-            max="2048"
-            step="64"
-            class="form-control"
-          />
+      <div class="row g-2 mb-3 align-items-center">
+        <div class="col">
+          <div class="input-group input-group-sm">
+            <span class="input-group-text">Width</span>
+            <input
+              type="number"
+              v-model.number="store.width"
+              min="64"
+              max="2048"
+              step="64"
+              class="form-control"
+            />
+          </div>
         </div>
-        <div class="col-md-6">
-          <label for="height" class="form-label">Height:</label>
-          <input
-            type="number"
-            id="height"
-            v-model.number="store.height"
-            min="64"
-            max="2048"
-            step="64"
-            class="form-control"
-          />
+        <div class="col-auto">
+          <button type="button" class="btn btn-outline-secondary btn-sm" @click="store.swapDimensions" title="Swap Dimensions">
+            ⇄
+          </button>
+        </div>
+        <div class="col">
+          <div class="input-group input-group-sm">
+            <span class="input-group-text">Height</span>
+            <input
+              type="number"
+              v-model.number="store.height"
+              min="64"
+              max="2048"
+              step="64"
+              class="form-control"
+            />
+          </div>
         </div>
       </div>
       <div v-if="store.width * store.height > 1024 * 1024" class="alert alert-warning py-1 small">
-        <i class="bi bi-exclamation-triangle"></i> High resolution detected. This may be slow or crash without VAE Tiling.
+        ⚠️ High resolution detected. This may be slow or crash without VAE Tiling.
       </div>
 
-      <div class="row g-3 mb-4">
+      <div class="row g-2 mb-4">
         <div class="col-md-6">
-          <label for="cfgScale" class="form-label">CFG Scale:</label>
-          <input
-            type="number"
-            id="cfgScale"
-            v-model.number="store.cfgScale"
-            min="1"
-            max="30"
-            step="0.1"
-            class="form-control"
-          />
+          <div class="input-group input-group-sm">
+            <span class="input-group-text">CFG</span>
+            <input
+              type="number"
+              v-model.number="store.cfgScale"
+              min="1"
+              max="30"
+              step="0.1"
+              class="form-control"
+            />
+          </div>
         </div>
         <div class="col-md-6">
-          <label for="sampler" class="form-label">Sampler:</label>
-          <select
-            id="sampler"
-            v-model="store.sampler"
-            class="form-select"
-          >
-            <option v-for="s in store.samplers" :key="s" :value="s">{{ s }}</option>
-          </select>
+          <div class="input-group input-group-sm">
+            <span class="input-group-text">Sampler</span>
+            <select
+              v-model="store.sampler"
+              class="form-select"
+            >
+              <option v-for="s in store.samplers" :key="s" :value="s">{{ s }}</option>
+            </select>
+          </div>
         </div>
       </div>
 

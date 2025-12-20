@@ -49,17 +49,14 @@ const dynamicAspectRatio = computed(() => {
   <div class="exploration-view-wrapper">
     <div class="row g-0 h-100">
       <!-- Sidebar -->
-      <aside class="col-md-3 border-end h-100 d-flex flex-column bg-body-tertiary">
-        <div class="p-3 flex-grow-1 overflow-y-auto">
-          <h5 class="mb-3 d-flex align-items-center">
-            <i class="bi bi-sliders2 me-2"></i>
-            Anchor Params
-          </h5>
-          
-          <CondensedGenerationForm />
-
-          <hr class="my-3">
-        </div>
+            <aside class="col-md-3 border-end h-100 d-flex flex-column bg-body-tertiary">
+              <div class="p-3 flex-grow-1 overflow-y-auto">
+                <h5 class="mb-3 d-flex align-items-center">
+                  🎛️ Anchor Params
+                </h5>
+                <CondensedGenerationForm />
+                <hr class="my-3">
+              </div>
 
         <div class="p-3 border-top bg-body">
           <button 

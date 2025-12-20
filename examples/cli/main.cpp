@@ -367,8 +367,8 @@ int main(int argc, const char* argv[]) {
         cli_params.preview_fps /= 4;
 
     sd_set_log_callback(sd_log_cb, (void*)&cli_params);
-    log_verbose = cli_params.verbose;
-    log_color   = cli_params.color;
+    set_log_verbose(cli_params.verbose);
+    set_log_color(cli_params.color);
     sd_set_preview_callback(step_callback,
                             cli_params.preview_method,
                             cli_params.preview_interval,
