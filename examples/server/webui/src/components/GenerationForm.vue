@@ -9,7 +9,7 @@ const props = defineProps<{
 const store = useGenerationStore()
 
 const n = () => {
-  if (!store.prompt || store.isLoading) return
+  if (!store.prompt || store.isGenerating || store.isModelSwitching) return
       store.generateImage({
       prompt: store.prompt,
       negative_prompt: store.negativePrompt,
@@ -60,6 +60,12 @@ const useImageSize = () => {
   }
 }
 
+const scale2x = () => {
+  store.width *= 2
+  store.height *= 2
+  store.strength = 0.4
+}
+
 const clearInitImage = () => {
   store.initImage = null
   uploadedImageWidth.value = 0
@@ -83,9 +89,12 @@ const clearInitImage = () => {
         </div>
         <div v-else class="position-relative border rounded p-2 text-center">
           <img :src="store.initImage" class="img-thumbnail" style="max-height: 200px;" />
-          <div class="mt-2 d-flex justify-content-center gap-2">
+          <div class="mt-2 d-flex justify-content-center flex-wrap gap-2">
             <button type="button" class="btn btn-outline-secondary btn-sm" @click="useImageSize">
               <i class="bi bi-aspect-ratio"></i> Use Size ({{ uploadedImageWidth }}x{{ uploadedImageHeight }})
+            </button>
+            <button type="button" class="btn btn-outline-info btn-sm" @click="scale2x">
+              <i class="bi bi-zoom-in"></i> Scale 2x
             </button>
             <button type="button" class="btn btn-danger btn-sm" @click="clearInitImage">
               <i class="bi bi-trash"></i> Clear
@@ -187,6 +196,9 @@ const clearInitImage = () => {
           />
         </div>
       </div>
+      <div v-if="store.width * store.height > 1024 * 1024" class="alert alert-warning py-1 small">
+        <i class="bi bi-exclamation-triangle"></i> High resolution detected. This may be slow or crash without VAE Tiling.
+      </div>
 
       <div class="row g-3 mb-4">
         <div class="col-md-6">
@@ -217,10 +229,11 @@ const clearInitImage = () => {
         <button
           type="submit"
           class="btn btn-primary"
-          :disabled="store.isLoading"
+          :disabled="store.isGenerating || store.isModelSwitching"
         >
-          <span v-if="store.isLoading" class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span>
-          {{ store.isLoading ? ' Generating...' : 'Generate' }}
+          <span v-if="store.isGenerating" class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span>
+          <span v-if="store.isModelSwitching" class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span>
+          {{ store.isGenerating ? ' Generating...' : (store.isModelSwitching ? ' Switching model...' : 'Generate') }}
         </button>
       </div>
     </form>

@@ -1,7 +1,14 @@
 <script setup lang="ts">
 import { useGenerationStore } from '@/stores/generation'
+import { useRouter } from 'vue-router'
 
 const store = useGenerationStore()
+const router = useRouter()
+
+function sendToImg2Img(url: string) {
+  store.initImage = url
+  router.push('/img2img')
+}
 </script>
 
 <template>
@@ -9,7 +16,7 @@ const store = useGenerationStore()
     <h5 class="card-title mb-4">Result</h5>
     <div class="image-display-container">
       <!-- Loading State -->
-      <div v-if="store.isLoading" class="d-flex flex-column align-items-center justify-content-center h-100 text-muted p-5">
+      <div v-if="store.isGenerating" class="d-flex flex-column align-items-center justify-content-center h-100 text-muted p-5">
         <div class="spinner-border text-primary" role="status">
           <span class="visually-hidden">Loading...</span>
         </div>
@@ -32,9 +39,16 @@ const store = useGenerationStore()
             'col-6': store.imageUrls.length > 1
           }"
         >
-          <a :href="url" target="_blank">
-            <img :src="url" :alt="'Generated Image ' + (index + 1)" class="img-fluid rounded shadow-sm" />
-          </a>
+          <div class="position-relative result-image-wrapper">
+            <a :href="url" target="_blank">
+              <img :src="url" :alt="'Generated Image ' + (index + 1)" class="img-fluid rounded shadow-sm" />
+            </a>
+            <div class="mt-2 text-center">
+              <button class="btn btn-sm btn-outline-success" @click="sendToImg2Img(url)">
+                <i class="bi bi-image"></i> Send to Img2Img
+              </button>
+            </div>
+          </div>
         </div>
       </div>
 

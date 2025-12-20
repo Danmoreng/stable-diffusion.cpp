@@ -66,7 +66,7 @@ function openModal(index: number) {
   }
 }
 
-function reuseParameters() {
+function reuseParameters(navigate = true) {
   const item = images.value[activeIndex.value]
   if (item && item.params) {
     const p = item.params
@@ -85,14 +85,46 @@ function reuseParameters() {
     if (p.width) store.width = p.width
     if (p.height) store.height = p.height
     
-    // Close modal and navigate
-    modalInstance?.hide()
-    
-    if (p.is_img2img || p.init_image) {
-      router.push('/img2img')
-    } else {
-      router.push('/')
+    if (navigate) {
+      // Close modal and navigate
+      modalInstance?.hide()
+      
+      if (p.is_img2img || p.init_image) {
+        router.push('/img2img')
+      } else {
+        router.push('/')
+      }
     }
+  }
+}
+
+async function sendToImg2Img() {
+  const item = images.value[activeIndex.value]
+  if (!item) return
+  
+  const imageUrl = '/outputs/' + item.name
+  
+  try {
+    const response = await fetch(imageUrl)
+    const blob = await response.blob()
+    const reader = new FileReader()
+    reader.onloadend = () => {
+      store.initImage = reader.result as string
+      
+      // Load dimensions
+      const img = new Image()
+      img.onload = () => {
+         // Optionally we could auto-set width/height here too
+      }
+      img.src = store.initImage
+
+      reuseParameters(false) // Reuse parameters but don't navigate yet
+      modalInstance?.hide()
+      router.push('/img2img')
+    }
+    reader.readAsDataURL(blob)
+  } catch (err) {
+    console.error('Failed to fetch image for img2img:', err)
   }
 }
 
@@ -138,11 +170,17 @@ onMounted(() => {
             <h5 class="modal-title" id="imageModalLabel">
               {{ images[activeIndex]?.name || 'Image Viewer' }}
             </h5>
-            <div class="ms-auto me-2">
+            <div class="ms-auto me-2 d-flex gap-2">
+              <button 
+                class="btn btn-outline-success btn-sm"
+                @click="sendToImg2Img"
+              >
+                <i class="bi bi-image"></i> Send to Img2Img
+              </button>
               <button 
                 v-if="images[activeIndex]?.params" 
                 class="btn btn-outline-primary btn-sm"
-                @click="reuseParameters"
+                @click="reuseParameters(true)"
               >
                 <i class="bi bi-arrow-repeat"></i> Reuse Parameters
               </button>

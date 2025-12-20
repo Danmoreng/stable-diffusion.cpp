@@ -21,7 +21,8 @@ export const useGenerationStore = defineStore('generation', () => {
   const savedSettings = localStorage.getItem('webui-settings')
   const initialState = savedSettings ? { ...defaults, ...JSON.parse(savedSettings) } : defaults
 
-  const isLoading = ref(false)
+  const isGenerating = ref(false)
+  const isModelSwitching = ref(false)
   const imageUrls = ref<string[]>([])
   const error = ref<string | null>(null)
 
@@ -45,6 +46,47 @@ export const useGenerationStore = defineStore('generation', () => {
   const isSidebarCollapsed = ref(false)
   const theme = ref(initialState.theme)
   const saveImages = ref(initialState.saveImages)
+
+  // Model Management State
+  const models = ref<any[]>([])
+  const currentModel = ref<string>('')
+  const isModelsLoading = ref(false)
+
+  async function fetchModels() {
+    isModelsLoading.value = true
+    try {
+      const response = await fetch('/v1/models')
+      const data = await response.json()
+      models.value = data.data
+      const activeModel = models.value.find(m => m.active)
+      if (activeModel) {
+        currentModel.value = activeModel.id
+      }
+    } catch (e) {
+      console.error('Failed to fetch models:', e)
+    } finally {
+      isModelsLoading.value = false
+    }
+  }
+
+  async function loadModel(modelId: string) {
+    isModelSwitching.value = true
+    try {
+      const response = await fetch('/v1/models/load', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model_id: modelId })
+      })
+      if (!response.ok) throw new Error('Failed to load model')
+      currentModel.value = modelId
+      // Refresh models list to update active status
+      await fetchModels()
+    } catch (e: any) {
+      error.value = e.message
+    } finally {
+      isModelSwitching.value = false
+    }
+  }
 
   function toggleSidebar() {
     isSidebarCollapsed.value = !isSidebarCollapsed.value
@@ -99,7 +141,8 @@ export const useGenerationStore = defineStore('generation', () => {
   }
 
   async function generateImage(params: GenerationParams) {
-    isLoading.value = true
+    if (isModelSwitching.value) return;
+    isGenerating.value = true
     imageUrls.value = []
     error.value = null
 
@@ -146,9 +189,9 @@ export const useGenerationStore = defineStore('generation', () => {
       error.value = e.message
       console.error(e)
     } finally {
-      isLoading.value = false
+      isGenerating.value = false
     }
   }
 
-  return { isLoading, imageUrls, error, generateImage, prompt, negativePrompt, steps, seed, cfgScale, strength, batchCount, sampler, samplers, width, height, isSidebarCollapsed, toggleSidebar, theme, toggleTheme, saveImages, initImage }
+  return { isGenerating, isModelSwitching, imageUrls, error, generateImage, prompt, negativePrompt, steps, seed, cfgScale, strength, batchCount, sampler, samplers, width, height, isSidebarCollapsed, toggleSidebar, theme, toggleTheme, saveImages, initImage, models, currentModel, isModelsLoading, fetchModels, loadModel }
 })

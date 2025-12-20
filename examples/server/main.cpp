@@ -16,10 +16,117 @@
 namespace fs = std::filesystem;
 
 // ----------------------- helpers -----------------------
+
+static void load_model_config(SDContextParams& ctx_params, const std::string& model_path_str, const std::string& model_dir) {
+
+    if (model_path_str.empty()) return;
+
+    
+
+    fs::path model_path(model_path_str);
+
+    fs::path config_path;
+
+    
+
+    if (model_path.is_absolute()) {
+
+        config_path = model_path;
+
+    } else {
+
+        config_path = fs::path(model_dir) / model_path;
+
+    }
+
+    config_path += ".json";
+
+
+
+
+
+    if (fs::exists(config_path)) {
+
+        LOG_INFO("Loading model config: %s", config_path.string().c_str());
+
+        try {
+
+            std::ifstream f(config_path);
+
+            json cfg = json::parse(f);
+
+
+
+            auto resolve = [&](const std::string& p) -> std::string {
+
+                if (p.empty()) return "";
+
+                fs::path fp(p);
+
+                if (fp.is_absolute()) return p;
+
+                return (fs::path(model_dir) / p).string();
+
+            };
+
+
+
+            if (cfg.contains("vae")) ctx_params.vae_path = resolve(cfg["vae"]);
+
+            if (cfg.contains("clip_l")) ctx_params.clip_l_path = resolve(cfg["clip_l"]);
+
+            if (cfg.contains("clip_g")) ctx_params.clip_g_path = resolve(cfg["clip_g"]);
+
+                                    if (cfg.contains("t5xxl")) ctx_params.t5xxl_path = resolve(cfg["t5xxl"]);
+
+                                    if (cfg.contains("llm")) ctx_params.llm_path = resolve(cfg["llm"]);
+
+                                    if (cfg.contains("clip_on_cpu")) ctx_params.clip_on_cpu = cfg["clip_on_cpu"];
+
+                                    if (cfg.contains("vae_on_cpu")) ctx_params.vae_on_cpu = cfg["vae_on_cpu"];
+
+                                    if (cfg.contains("offload_to_cpu")) ctx_params.offload_params_to_cpu = cfg["offload_to_cpu"];
+
+                                    if (cfg.contains("flash_attn")) ctx_params.diffusion_flash_attn = cfg["flash_attn"];
+
+                                    if (cfg.contains("vae_tiling")) ctx_params.vae_tiling_params.enabled = cfg["vae_tiling"];
+
+                        
+
+                                    LOG_INFO("Config applied: vae=%s, clip_l=%s, t5=%s, clip_on_cpu=%s, flash_attn=%s",
+
+                                             ctx_params.vae_path.c_str(),
+
+                                             ctx_params.clip_l_path.c_str(),
+
+                                             ctx_params.t5xxl_path.c_str(),
+
+                                             ctx_params.clip_on_cpu ? "true" : "false",
+
+                                             ctx_params.diffusion_flash_attn ? "true" : "false");
+
+                        
+
+            
+
+        } catch (const std::exception& e) {
+
+            LOG_WARN("Failed to parse model config: %s", e.what());
+
+        }
+
+    }
+
+}
+
+
+
 static const std::string base64_chars =
+
+
     "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
     "abcdefghijklmnopqrstuvwxyz"
-    "0123456789+/";
+    "0123456789+/ ";
 
 std::string base64_encode(const std::vector<uint8_t>& bytes) {
     std::string ret;
@@ -104,6 +211,7 @@ std::string iso_timestamp_now() {
 struct SDSvrParams {
     std::string listen_ip = "127.0.0.1";
     int listen_port       = 1234;
+    std::string model_dir = "./models";
     bool normal_exit      = false;
     bool verbose          = false;
     bool color            = false;
@@ -112,24 +220,31 @@ struct SDSvrParams {
         ArgOptions options;
 
         options.string_options = {
-            {"-l",
+            {" -l",
              "--listen-ip",
              "server listen ip (default: 127.0.0.1)",
-             &listen_ip}};
+             &listen_ip},
+            {
+             "",
+             "--model-dir",
+             "directory to scan for models (default: ./models)",
+             &model_dir}};
 
         options.int_options = {
-            {"",
+            {
+             "",
              "--listen-port",
              "server listen port (default: 1234)",
              &listen_port},
         };
 
         options.bool_options = {
-            {"-v",
+            {" -v",
              "--verbose",
              "print extra info",
              true, &verbose},
-            {"",
+            {
+             "",
              "--color",
              "colors the logging tags according to level",
              true, &color},
@@ -141,7 +256,7 @@ struct SDSvrParams {
         };
 
         options.manual_options = {
-            {"-h",
+            {" -h",
              "--help",
              "show this help message and exit",
              on_help_arg},
@@ -191,9 +306,32 @@ void parse_args(int argc, const char** argv, SDSvrParams& svr_params, SDContextP
         exit(svr_params.normal_exit ? 0 : 1);
     }
 
-    if (!svr_params.process_and_check() ||
-        !ctx_params.process_and_check(IMG_GEN) ||
-        !default_gen_params.process_and_check(IMG_GEN, ctx_params.lora_model_dir)) {
+    // Custom check for server: allow missing model if model_dir is present
+    bool has_model = (ctx_params.model_path.length() > 0 || ctx_params.diffusion_model_path.length() > 0);
+    
+    if (!svr_params.process_and_check()) {
+        print_usage(argc, argv, options_vec);
+        exit(1);
+    }
+
+    if (!has_model && svr_params.model_dir.empty()) {
+        LOG_ERROR("error: either --model/--diffusion-model or --model-dir must be specified");
+        exit(1);
+    }
+
+    // Load config for the initial model if present
+    if (has_model) {
+        std::string active_path = ctx_params.diffusion_model_path.empty() ? ctx_params.model_path : ctx_params.diffusion_model_path;
+        load_model_config(ctx_params, active_path, svr_params.model_dir);
+    }
+
+    // We skip ctx_params.process_and_check(IMG_GEN) here if we don't have a model yet,
+    // but we still want to initialize some defaults.
+    if (ctx_params.n_threads <= 0) {
+        ctx_params.n_threads = sd_get_num_physical_cores();
+    }
+
+    if (!default_gen_params.process_and_check(IMG_GEN, ctx_params.lora_model_dir)) {
         print_usage(argc, argv, options_vec);
         exit(1);
     }
@@ -270,11 +408,16 @@ int main(int argc, const char** argv) {
     LOG_DEBUG("%s", default_gen_params.to_string().c_str());
 
     sd_ctx_params_t sd_ctx_params = ctx_params.to_sd_ctx_params_t(false, false, false);
-    sd_ctx_t* sd_ctx              = new_sd_ctx(&sd_ctx_params);
-
-    if (sd_ctx == nullptr) {
-        LOG_ERROR("new_sd_ctx_t failed");
-        return 1;
+    sd_ctx_t* sd_ctx              = nullptr;
+    
+    if (!ctx_params.model_path.empty() || !ctx_params.diffusion_model_path.empty()) {
+        sd_ctx = new_sd_ctx(&sd_ctx_params);
+        if (sd_ctx == nullptr) {
+            LOG_ERROR("new_sd_ctx failed for initial model");
+            return 1;
+        }
+    } else {
+        LOG_INFO("Starting server without an initial model. Please load one via the API.");
     }
 
     std::mutex sd_ctx_mutex;
@@ -312,12 +455,136 @@ int main(int argc, const char** argv) {
         res.set_content(R"({"ok":true,"service":"sd-cpp-http"})", "application/json");
     });
 
-    // models endpoint (minimal)
+    // models endpoint
     svr.Get("/v1/models", [&](const httplib::Request&, httplib::Response& res) {
         json r;
         r["data"] = json::array();
-        r["data"].push_back({{"id", "sd-cpp-local"}, {"object", "model"}, {"owned_by", "local"}});
+        
+        std::string current_model_name = fs::path(ctx_params.diffusion_model_path).filename().string();
+        if (current_model_name.empty()) {
+            current_model_name = fs::path(ctx_params.model_path).filename().string();
+        }
+
+        auto scan_dir = [&](const std::string& sub_dir) {
+            fs::path base_path = fs::path(svr_params.model_dir) / sub_dir;
+            if (fs::exists(base_path) && fs::is_directory(base_path)) {
+                for (const auto& entry : fs::recursive_directory_iterator(base_path)) {
+                    if (entry.is_regular_file()) {
+                        auto ext = entry.path().extension().string();
+                        if (ext == ".gguf" || ext == ".safetensors" || ext == ".ckpt") {
+                            json model;
+                            // Use relative path from model_dir as ID for easy loading
+                            std::string rel_path = fs::relative(entry.path(), svr_params.model_dir).string();
+                            std::replace(rel_path.begin(), rel_path.end(), '\\', '/');
+
+                            model["id"] = rel_path;
+                            model["name"] = entry.path().filename().string();
+                            model["type"] = sub_dir;
+                            model["object"] = "model";
+                            model["owned_by"] = "local";
+                            model["active"] = (model["name"] == current_model_name);
+                            r["data"].push_back(model);
+                        }
+                    }
+                }
+            }
+        };
+
+        try {
+            scan_dir("stable-diffusion");
+            scan_dir("lora");
+            scan_dir("vae");
+            scan_dir("text-encoder");
+            scan_dir("esrgan");
+            
+            // Also scan root of model_dir for convenience
+            if (fs::exists(svr_params.model_dir) && fs::is_directory(svr_params.model_dir)) {
+                for (const auto& entry : fs::directory_iterator(svr_params.model_dir)) {
+                    if (entry.is_regular_file()) {
+                        auto ext = entry.path().extension().string();
+                        if (ext == ".gguf" || ext == ".safetensors" || ext == ".ckpt") {
+                            json model;
+                            model["id"] = entry.path().filename().string();
+                            model["name"] = entry.path().filename().string();
+                            model["type"] = "root";
+                            model["object"] = "model";
+                            model["owned_by"] = "local";
+                            model["active"] = (model["id"] == current_model_name);
+                            r["data"].push_back(model);
+                        }
+                    }
+                }
+            }
+        } catch (const std::exception& e) {
+            LOG_ERROR("failed to list models: %s", e.what());
+        }
+
         res.set_content(r.dump(), "application/json");
+    });
+
+    svr.Post("/v1/models/load", [&](const httplib::Request& req, httplib::Response& res) {
+        try {
+            json body = json::parse(req.body);
+            if (!body.contains("model_id")) {
+                res.status = 400;
+                res.set_content(R"({"error":"model_id (relative path) required"})", "application/json");
+                return;
+            }
+            std::string model_id = body["model_id"];
+            fs::path model_path = fs::path(svr_params.model_dir) / model_id;
+            
+            if (!fs::exists(model_path)) {
+                res.status = 404;
+                res.set_content(R"({"error":"model file not found at " + model_path.string()})", "application/json");
+                return;
+            }
+
+            LOG_INFO("Loading new model: %s", model_path.string().c_str());
+
+            {
+                std::lock_guard<std::mutex> lock(sd_ctx_mutex);
+                
+                // Free old context
+                if (sd_ctx) {
+                    free_sd_ctx(sd_ctx);
+                    sd_ctx = nullptr;
+                }
+
+                // Update params based on where it was found
+                std::string rel_s = model_id;
+                if (rel_s.find("vae/") == 0) {
+                     ctx_params.vae_path = model_path.string();
+                } else if (rel_s.find("esrgan/") == 0) {
+                     ctx_params.esrgan_path = model_path.string();
+                } else {
+                     // Main model load - Reset optional paths
+                     ctx_params.diffusion_model_path = model_path.string();
+                     ctx_params.model_path = "";
+                     ctx_params.vae_path = "";
+                     ctx_params.clip_l_path = "";
+                     ctx_params.clip_g_path = "";
+                     ctx_params.t5xxl_path = "";
+                     ctx_params.llm_path = "";
+
+                     // Use helper to load sidecar config
+                     load_model_config(ctx_params, ctx_params.diffusion_model_path, svr_params.model_dir);
+                }
+
+                sd_ctx_params_t sd_ctx_p = ctx_params.to_sd_ctx_params_t(false, false, false);
+                sd_ctx = new_sd_ctx(&sd_ctx_p);
+
+                if (!sd_ctx) {
+                    throw std::runtime_error("failed to create new context with selected model");
+                }
+            }
+
+            res.set_content(R"({"status":"success","model":")" + model_id + R"("})", "application/json");
+
+        } catch (const std::exception& e) {
+            LOG_ERROR("error loading model: %s", e.what());
+            res.status = 500;
+            res.set_content(R"({"error":")" + std::string(e.what()) + R"("})", "application/json");
+        }
     });
 
     // image history endpoint
@@ -522,6 +789,11 @@ int main(int argc, const char** argv) {
 
             {
                 std::lock_guard<std::mutex> lock(sd_ctx_mutex);
+                if (sd_ctx == nullptr) {
+                    res.status = 400;
+                    res.set_content(R"({"error":"no model loaded"})", "application/json");
+                    return;
+                }
                 results     = generate_image(sd_ctx, &img_gen_params);
                 num_results = gen_params.batch_count;
             }
@@ -566,6 +838,13 @@ int main(int argc, const char** argv) {
                         }
                         meta["is_img2img"] = has_init;
                         meta["seed"] = gen_params.seed;
+
+                        // Add current model name
+                        std::string active_model = fs::path(ctx_params.diffusion_model_path).filename().string();
+                        if (active_model.empty()) {
+                            active_model = fs::path(ctx_params.model_path).filename().string();
+                        }
+                        meta["model"] = active_model;
                         
                         std::ofstream json_file(json_filename);
                         json_file << meta.dump(4);
@@ -783,6 +1062,11 @@ int main(int argc, const char** argv) {
 
             {
                 std::lock_guard<std::mutex> lock(sd_ctx_mutex);
+                if (sd_ctx == nullptr) {
+                    res.status = 400;
+                    res.set_content(R"({"error":"no model loaded"})", "application/json");
+                    return;
+                }
                 results     = generate_image(sd_ctx, &img_gen_params);
                 num_results = gen_params.batch_count;
             }

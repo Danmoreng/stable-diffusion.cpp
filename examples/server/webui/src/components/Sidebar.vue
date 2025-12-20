@@ -1,9 +1,44 @@
 <script setup lang="ts">
-// This component is now only for navigation
+import { onMounted } from 'vue'
+import { useGenerationStore } from '@/stores/generation'
+
+const store = useGenerationStore()
+
+onMounted(() => {
+  store.fetchModels()
+})
+
+const handleModelChange = (event: Event) => {
+  const target = event.target as HTMLSelectElement
+  if (target.value) {
+    store.loadModel(target.value)
+  }
+}
 </script>
 
 <template>
   <div class="p-3">
+    <h5 class="mb-3">Model</h5>
+    <div class="mb-4">
+      <select 
+        class="form-select form-select-sm" 
+        :value="store.currentModel" 
+        @change="handleModelChange"
+        :disabled="store.isModelSwitching || store.isGenerating"
+      >
+        <option v-if="store.isModelsLoading" disabled>Loading models...</option>
+        <template v-else>
+          <!-- Only show main models from stable-diffusion directory for a cleaner UI -->
+          <option v-for="model in store.models.filter(m => m.type === 'stable-diffusion' || m.type === 'root')" :key="model.id" :value="model.id">
+            {{ model.name }}
+          </option>
+        </template>
+      </select>
+      <div v-if="store.isModelSwitching && !store.isModelsLoading" class="mt-2 small text-primary">
+         <span class="spinner-border spinner-border-sm"></span> Switching model...
+      </div>
+    </div>
+
     <h5 class="mb-3">Menu</h5>
     <ul class="nav nav-pills flex-column">
       <li class="nav-item">
