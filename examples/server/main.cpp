@@ -17,6 +17,50 @@ namespace fs = std::filesystem;
 
 // ----------------------- helpers -----------------------
 
+struct ProgressState {
+    int step = 0;
+    int steps = 0;
+    float time = 0;
+    std::string phase = "";
+    uint64_t version = 0;
+    std::mutex mutex;
+    std::condition_variable cv;
+} progress_state;
+
+void on_progress(int step, int steps, float time, void* data) {
+    ProgressState* state = (ProgressState*)data;
+    {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        state->step = step;
+        state->steps = steps;
+        state->time = time;
+        state->version++;
+    }
+    state->cv.notify_all();
+}
+
+void reset_progress() {
+    {
+        std::lock_guard<std::mutex> lock(progress_state.mutex);
+        progress_state.step = 0;
+        progress_state.steps = 0;
+        progress_state.phase = "";
+        progress_state.version++;
+    }
+    progress_state.cv.notify_all();
+}
+
+void set_progress_phase(const std::string& phase) {
+    {
+        std::lock_guard<std::mutex> lock(progress_state.mutex);
+        progress_state.phase = phase;
+        progress_state.step = 0;
+        progress_state.steps = 0;
+        progress_state.version++;
+    }
+    progress_state.cv.notify_all();
+}
+
 static void load_model_config(SDContextParams& ctx_params, const std::string& model_path_str, const std::string& model_dir) {
 
     if (model_path_str.empty()) return;
@@ -398,6 +442,7 @@ int main(int argc, const char** argv) {
     parse_args(argc, argv, svr_params, ctx_params, default_gen_params);
 
     sd_set_log_callback(sd_log_cb, (void*)&svr_params);
+    sd_set_progress_callback(on_progress, &progress_state);
     log_verbose = svr_params.verbose;
     log_color   = svr_params.color;
 
@@ -453,6 +498,79 @@ int main(int argc, const char** argv) {
     // health
     svr.Get("/", [&](const httplib::Request&, httplib::Response& res) {
         res.set_content(R"({"ok":true,"service":"sd-cpp-http"})", "application/json");
+    });
+
+    svr.Get("/v1/progress", [&](const httplib::Request&, httplib::Response& res) {
+        json r;
+        {
+            std::lock_guard<std::mutex> lock(progress_state.mutex);
+            r["step"] = progress_state.step;
+            r["steps"] = progress_state.steps;
+            r["time"] = progress_state.time;
+        }
+        res.set_content(r.dump(), "application/json");
+    });
+
+    svr.Get("/v1/stream/progress", [&](const httplib::Request&, httplib::Response& res) {
+        res.set_header("Cache-Control", "no-cache");
+        res.set_header("Connection", "keep-alive");
+        res.set_header("X-Accel-Buffering", "no"); // Disable proxy buffering
+
+        res.set_chunked_content_provider("text/event-stream", [&](size_t offset, httplib::DataSink &sink) {
+            uint64_t last_version = 0;
+            int step = 0;
+            int steps = 0;
+            float time = 0;
+            std::string phase = "";
+
+            // Send initial state or at least a comment to open the stream
+            {
+                std::lock_guard<std::mutex> lock(progress_state.mutex);
+                last_version = progress_state.version;
+                step = progress_state.step;
+                steps = progress_state.steps;
+                time = progress_state.time;
+                phase = progress_state.phase;
+            }
+            
+            json initial_j;
+            initial_j["step"] = step;
+            initial_j["steps"] = steps;
+            initial_j["time"] = time;
+            initial_j["phase"] = phase;
+            std::string initial_s = "data: " + initial_j.dump() + "\n\n";
+            if (!sink.write(initial_s.c_str(), initial_s.size())) return false;
+
+            while (true) {
+                std::unique_lock<std::mutex> lock(progress_state.mutex);
+                // Wait for a new version, or a timeout to send a keep-alive
+                if (!progress_state.cv.wait_for(lock, std::chrono::seconds(15), 
+                    [&]{ return progress_state.version > last_version; })) {
+                    // Timeout - send keep-alive comment (ping)
+                    lock.unlock();
+                    if (!sink.write(": ping\n\n", 9)) return false;
+                    continue;
+                }
+                
+                step = progress_state.step;
+                steps = progress_state.steps;
+                time = progress_state.time;
+                phase = progress_state.phase;
+                last_version = progress_state.version;
+                lock.unlock();
+
+                json j;
+                j["step"] = step;
+                j["steps"] = steps;
+                j["time"] = time;
+                j["phase"] = phase;
+                std::string s = "data: " + j.dump() + "\n\n";
+                if (!sink.write(s.c_str(), s.size())) {
+                    return false;
+                }
+            }
+            return true;
+        });
     });
 
     // models endpoint
@@ -636,6 +754,7 @@ int main(int argc, const char** argv) {
 
     // core endpoint: /v1/images/generations
     svr.Post("/v1/images/generations", [&](const httplib::Request& req, httplib::Response& res) {
+        reset_progress();
         try {
             if (req.body.empty()) {
                 res.status = 400;
@@ -794,10 +913,12 @@ int main(int argc, const char** argv) {
                     res.set_content(R"({"error":"no model loaded"})", "application/json");
                     return;
                 }
+                set_progress_phase("Sampling...");
                 results     = generate_image(sd_ctx, &img_gen_params);
                 num_results = gen_params.batch_count;
             }
 
+            set_progress_phase("VAE Decoding...");
             for (int i = 0; i < num_results; i++) {
                 if (results[i].data == nullptr) {
                     continue;
@@ -885,6 +1006,7 @@ int main(int argc, const char** argv) {
     });
 
     svr.Post("/v1/images/edits", [&](const httplib::Request& req, httplib::Response& res) {
+        reset_progress();
         try {
             if (!req.is_multipart_form_data()) {
                 res.status = 400;
@@ -1067,10 +1189,12 @@ int main(int argc, const char** argv) {
                     res.set_content(R"({"error":"no model loaded"})", "application/json");
                     return;
                 }
+                set_progress_phase("Sampling...");
                 results     = generate_image(sd_ctx, &img_gen_params);
                 num_results = gen_params.batch_count;
             }
 
+            set_progress_phase("VAE Decoding...");
             json out;
             out["created"]       = iso_timestamp_now();
             out["data"]          = json::array();

@@ -28,6 +28,7 @@ export const useExplorationStore = defineStore('exploration', () => {
   const neighborCells = ref<MutationResult[]>([]);
   const centerUrl = ref<string | null>(null);
   const isGeneratingVariations = ref(false);
+  const isAnchorGenerating = ref(false);
   let isInternalChange = false;
   let currentAbortController: AbortController | null = null;
 
@@ -37,6 +38,8 @@ export const useExplorationStore = defineStore('exploration', () => {
       currentAbortController.abort();
       currentAbortController = null;
     }
+    isAnchorGenerating.value = false;
+    neighborCells.value.forEach(c => c.isGenerating = false);
   }
 
   // Sync initial state if empty
@@ -73,7 +76,8 @@ export const useExplorationStore = defineStore('exploration', () => {
     currentAbortController = new AbortController();
     const signal = currentAbortController.signal;
 
-    isGeneratingVariations.value = true;
+    isGeneratingVariations.value = true
+    generationStore.startStreamingProgress();
     try {
       // Reset URLs so they show the loading spinner
       neighborCells.value.forEach(c => c.url = undefined);
@@ -85,6 +89,7 @@ export const useExplorationStore = defineStore('exploration', () => {
       if (currentAbortController?.signal === signal) {
         isGeneratingVariations.value = false;
         currentAbortController = null;
+        generationStore.stopStreamingProgress();
       }
     }
   }
@@ -92,6 +97,7 @@ export const useExplorationStore = defineStore('exploration', () => {
   async function generateAll(signal: AbortSignal) {
     // 1. Generate center image if missing
     if (!centerUrl.value) {
+      isAnchorGenerating.value = true;
       try {
         console.log('Generating missing anchor image...');
         const centerResults = await generationStore.requestImage({
@@ -107,6 +113,8 @@ export const useExplorationStore = defineStore('exploration', () => {
       } catch (e: any) {
         if (e.name === 'AbortError') return;
         console.error('Failed to generate center image', e);
+      } finally {
+        isAnchorGenerating.value = false;
       }
     }
 
@@ -114,6 +122,7 @@ export const useExplorationStore = defineStore('exploration', () => {
     for (const cell of neighborCells.value) {
       if (signal.aborted) break;
       if (cell.url) continue;
+      cell.isGenerating = true;
       try {
         const results = await generationStore.requestImage({
           ...cell.params,
@@ -128,6 +137,8 @@ export const useExplorationStore = defineStore('exploration', () => {
       } catch (e: any) {
         if (e.name === 'AbortError') return;
         console.error(`Failed to generate variation: ${cell.label}`, e);
+      } finally {
+        cell.isGenerating = false;
       }
     }
   }
@@ -167,6 +178,7 @@ export const useExplorationStore = defineStore('exploration', () => {
     neighborCells,
     centerUrl,
     isGeneratingVariations,
+    isAnchorGenerating,
     syncFromGenerationStore,
     refreshVariations,
     promoteToCenter,

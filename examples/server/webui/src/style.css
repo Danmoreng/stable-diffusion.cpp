@@ -21,18 +21,12 @@ html, body, #app {
 }
 
 .sidebar {
-  width: 280px;
+  width: 240px;
   flex-shrink: 0;
-  transition: margin-left 0.25s ease-in-out;
   overflow-y: auto;
 }
 
 .main-content {
   flex-grow: 1;
   overflow-y: auto;
-  transition: margin-left 0.25s ease-in-out;
-}
-
-#content-wrapper.sidebar-collapsed .sidebar {
-  margin-left: -280px;
 }

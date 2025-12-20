@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { ref, watch } from 'vue'
+import { ref, watch, computed } from 'vue'
 
 export const useGenerationStore = defineStore('generation', () => {
   // --- State Initialization ---
@@ -51,6 +51,107 @@ export const useGenerationStore = defineStore('generation', () => {
   const models = ref<any[]>([])
   const currentModel = ref<string>('')
   const isModelsLoading = ref(false)
+
+  // Progress State
+  const progressStep = ref(0)
+  const progressSteps = ref(0)
+  const progressTime = ref(0)
+  const progressPhase = ref('')
+  let progressSource: EventSource | null = null
+  
+  // Helpers for better ETA
+  const lastStepTime = ref(0);
+  const lastStepIndex = ref(0);
+  const stepTimeHistory = ref<number[]>([]);
+
+  const eta = computed(() => {
+    if (progressSteps.value === 0 || progressStep.value === 0) return 0;
+    
+    // Use the average of the last few steps if available for a more stable estimate
+    // otherwise fallback to total average
+    const history = stepTimeHistory.value;
+    const avgStepTime = history.length > 0 
+      ? history.reduce((a, b) => a + b, 0) / history.length 
+      : progressTime.value / progressStep.value;
+
+    const remainingSteps = progressSteps.value - progressStep.value;
+    return Math.round(avgStepTime * remainingSteps);
+  });
+
+  function startStreamingProgress() {
+    if (progressSource) progressSource.close();
+    progressStep.value = 0;
+    progressSteps.value = 0;
+    progressTime.value = 0;
+    progressPhase.value = 'Initializing...';
+    lastStepTime.value = 0;
+    lastStepIndex.value = 0;
+    stepTimeHistory.value = [];
+    
+    console.log('Starting progress stream...');
+    progressSource = new EventSource('/v1/stream/progress');
+    
+    progressSource.onopen = () => {
+      console.log('Progress stream connection opened.');
+    };
+
+    progressSource.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        
+        if (data.phase) {
+          if (data.phase !== progressPhase.value) {
+            // Reset history on phase change as VAE steps have different timings than Sampling
+            stepTimeHistory.value = [];
+          }
+          progressPhase.value = data.phase;
+        }
+
+        // Calculate time for this specific step
+        if (data.step > lastStepIndex.value) {
+          const deltaT = data.time - lastStepTime.value;
+          const deltaS = data.step - lastStepIndex.value;
+          const timePerStep = deltaT / deltaS;
+          
+          if (timePerStep > 0) {
+            stepTimeHistory.value.push(timePerStep);
+            // Keep only the last 5 steps for a rolling average
+            if (stepTimeHistory.value.length > 5) {
+              stepTimeHistory.value.shift();
+            }
+          }
+          
+          lastStepTime.value = data.time;
+          lastStepIndex.value = data.step;
+        } else if (data.step < lastStepIndex.value) {
+          // New sub-batch or reset
+          lastStepTime.value = data.time;
+          lastStepIndex.value = data.step;
+        }
+
+        progressStep.value = data.step;
+        progressSteps.value = data.steps;
+        progressTime.value = data.time;
+      } catch (e) {
+        console.error('Error parsing progress stream data:', event.data, e);
+      }
+    };
+
+    progressSource.onerror = (err) => {
+      console.error('Progress stream error:', err);
+    };
+  }
+
+  function stopStreamingProgress() {
+    if (progressSource) {
+      progressSource.close();
+      progressSource = null;
+    }
+    progressStep.value = 0;
+    progressSteps.value = 0;
+    progressTime.value = 0;
+    progressPhase.value = '';
+  }
 
   async function fetchModels() {
     isModelsLoading.value = true
@@ -186,6 +287,7 @@ export const useGenerationStore = defineStore('generation', () => {
     isGenerating.value = true
     imageUrls.value = []
     error.value = null
+    startStreamingProgress();
 
     try {
       imageUrls.value = await requestImage(params);
@@ -194,8 +296,9 @@ export const useGenerationStore = defineStore('generation', () => {
       console.error(e)
     } finally {
       isGenerating.value = false
+      stopStreamingProgress();
     }
   }
 
-  return { isGenerating, isModelSwitching, imageUrls, error, generateImage, requestImage, prompt, negativePrompt, steps, seed, cfgScale, strength, batchCount, sampler, samplers, width, height, isSidebarCollapsed, toggleSidebar, theme, toggleTheme, saveImages, initImage, models, currentModel, isModelsLoading, fetchModels, loadModel }
+  return { isGenerating, isModelSwitching, imageUrls, error, generateImage, requestImage, prompt, negativePrompt, steps, seed, cfgScale, strength, batchCount, sampler, samplers, width, height, isSidebarCollapsed, toggleSidebar, theme, toggleTheme, saveImages, initImage, models, currentModel, isModelsLoading, fetchModels, loadModel, progressStep, progressSteps, progressTime, progressPhase, eta, startStreamingProgress, stopStreamingProgress }
 })

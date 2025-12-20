@@ -17,13 +17,18 @@ onMounted(() => {
 
 const gridCells = computed(() => {
   // Map neighbor cells to include their original data
-  const cells = explorationStore.neighborCells.map(c => ({...c, isCenter: false}));
+  const cells = explorationStore.neighborCells.map(c => ({
+    ...c, 
+    isCenter: false, 
+    activeGenerating: c.isGenerating
+  }));
   
   const centerCell = {
     params: explorationStore.centerParams,
     label: 'Anchor',
     url: explorationStore.centerUrl,
-    isCenter: true
+    isCenter: true,
+    activeGenerating: explorationStore.isAnchorGenerating
   };
   
   // Insert center at index 4
@@ -97,9 +102,27 @@ const dynamicAspectRatio = computed(() => {
                   <!-- Image Wrapper (Absolute to fill aspect-ratio card) -->
                   <div class="position-absolute top-0 start-0 w-100 h-100 d-flex align-items-center justify-content-center">
                     <img v-if="cell.url" :src="cell.url" class="img-fluid grid-img" />
-                    <div v-else class="text-center p-2">
-                      <div class="spinner-border spinner-border-sm text-light" role="status"></div>
-                      <div class="text-light mt-1 tiny-text">Generating...</div>
+                    <div v-else class="text-center p-2 w-100">
+                      <div class="spinner-border spinner-border-sm text-light mb-2" role="status"></div>
+                      <div class="text-light tiny-text mb-2">
+                        {{ cell.activeGenerating ? 'Generating...' : 'Waiting...' }}
+                      </div>
+                      
+                      <!-- Cell Progress (Only for active) -->
+                      <div v-if="cell.activeGenerating && generationStore.progressSteps > 0" class="px-3">
+                        <div class="tiny-text text-info mb-1 fw-bold">{{ generationStore.progressPhase }}</div>
+                        <div class="progress bg-secondary mb-1" style="height: 4px;">
+                          <div 
+                            class="progress-bar bg-info progress-bar-striped progress-bar-animated" 
+                            role="progressbar" 
+                            :style="{ width: (generationStore.progressStep / generationStore.progressSteps * 100) + '%' }"
+                          ></div>
+                        </div>
+                        <div class="tiny-text text-light d-flex justify-content-between">
+                          <span>{{ generationStore.progressStep }}/{{ generationStore.progressSteps }}</span>
+                          <span>{{ generationStore.progressTime.toFixed(0) }}s</span>
+                        </div>
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -114,8 +137,8 @@ const dynamicAspectRatio = computed(() => {
 
 <style scoped>
 .exploration-view-wrapper {
-  height: calc(100vh - 56px - 2rem); /* Viewport - Navbar - Main Padding */
-  margin: -1rem; /* Negate parent padding */
+  height: calc(100vh - 4rem); /* Viewport - padding */
+  margin: 0;
 }
 
 .exploration-grid-container {

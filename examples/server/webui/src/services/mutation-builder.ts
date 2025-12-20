@@ -21,6 +21,7 @@ export type MutationResult = {
   params: GenParams;
   label: string;
   url?: string;
+  isGenerating?: boolean;
 };
 
 export class MutationBuilder {
