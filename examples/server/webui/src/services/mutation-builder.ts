@@ -60,7 +60,7 @@ export class MutationBuilder {
           const newSteps = Math.max(3, centerParams.steps + change);
           if (newSteps === centerParams.steps) return null;
           return {
-            params: { ...centerParams, steps: newSteps },
+            params: { ...centerParams, seed: centerParams.seed, steps: newSteps },
             label: `Steps ${change > 0 ? '+' : ''}${change}`
           };
         });
@@ -73,7 +73,7 @@ export class MutationBuilder {
           const newGuidance = Math.max(1.0, centerParams.guidanceScale + change);
           if (Math.abs(newGuidance - centerParams.guidanceScale) < 0.01) return null;
           return {
-            params: { ...centerParams, guidanceScale: Number(newGuidance.toFixed(1)) },
+            params: { ...centerParams, seed: centerParams.seed, guidanceScale: Number(newGuidance.toFixed(1)) },
             label: `Guidance ${change > 0 ? '+' : ''}${change.toFixed(1)}`
           };
         });
@@ -86,7 +86,7 @@ export class MutationBuilder {
           const nextIndex = (currentIndex + offset) % this.samplers.length;
           const nextSampler = this.samplers[nextIndex];
           return {
-            params: { ...centerParams, scheduler: nextSampler },
+            params: { ...centerParams, seed: centerParams.seed, scheduler: nextSampler },
             label: `Sampler: ${nextSampler}`
           };
         });

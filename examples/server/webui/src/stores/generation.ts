@@ -43,7 +43,7 @@ export const useGenerationStore = defineStore('generation', () => {
   const initImage = ref<string | null>(null)
 
   // UI State
-  const isSidebarCollapsed = ref(false)
+  const isSidebarCollapsed = ref(localStorage.getItem('sidebar-collapsed') === 'true')
   const theme = ref(initialState.theme)
   const saveImages = ref(initialState.saveImages)
 
@@ -51,6 +51,11 @@ export const useGenerationStore = defineStore('generation', () => {
   const models = ref<any[]>([])
   const currentModel = ref<string>('')
   const isModelsLoading = ref(false)
+
+  // Watch for sidebar changes and persist
+  watch(isSidebarCollapsed, (newVal) => {
+    localStorage.setItem('sidebar-collapsed', String(newVal))
+  })
 
   // Progress State
   const progressStep = ref(0)

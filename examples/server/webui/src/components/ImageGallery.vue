@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, nextTick } from 'vue'
+import { ref, onMounted, nextTick, computed } from 'vue'
 import { Modal, Carousel } from 'bootstrap'
 import { useGenerationStore } from '@/stores/generation'
 import { useRouter } from 'vue-router'
@@ -22,6 +22,17 @@ let modalInstance: Modal | null = null
 let carouselInstance: Carousel | null = null
 
 const activeIndex = ref(0)
+
+// Gallery Layout State
+const columnsPerRow = ref(Number(localStorage.getItem('gallery-columns')) || 4)
+
+const setColumns = (count: number) => {
+  columnsPerRow.value = Math.max(2, Math.min(12, count))
+  localStorage.setItem('gallery-columns', String(columnsPerRow.value))
+}
+
+// Expose for parent component
+defineExpose({ columnsPerRow, setColumns })
 
 async function fetchImages() {
   isLoading.value = true
@@ -150,13 +161,13 @@ onMounted(() => {
       <p>Generate some images with the "Save Images Automatically" setting enabled.</p>
     </div>
 
-    <!-- Image Grid -->
-    <div v-else class="row g-3">
-      <div v-for="(image, index) in images" :key="image.name" class="col-xl-3 col-lg-4 col-md-6">
-        <div class="card card-clickable shadow-sm h-100" @click="openModal(index)">
+    <!-- Image Grid (Custom CSS Grid) -->
+    <div v-else class="custom-gallery-grid" :style="{ '--cols': columnsPerRow }">
+      <div v-for="(image, index) in images" :key="image.name" class="gallery-item">
+        <div class="card card-clickable shadow-sm h-100 border-0 bg-dark bg-opacity-10" @click="openModal(index)">
           <img :src="'/outputs/' + image.name" class="card-img-top" :alt="image.name" loading="lazy" />
-          <div class="card-footer p-2 text-truncate small text-muted">
-            {{ image.name }}
+          <div class="card-footer p-1 text-truncate x-small text-muted text-center border-0 bg-transparent">
+            {{ image.name.substring(4, 14) }}
           </div>
         </div>
       </div>
@@ -223,9 +234,23 @@ onMounted(() => {
 </template>
 
 <style scoped>
+.custom-gallery-grid {
+  display: grid;
+  grid-template-columns: repeat(var(--cols, 4), 1fr);
+  gap: 1rem;
+}
+
+.gallery-item {
+  min-width: 0; /* Prevent grid breakout */
+}
+
 .card-img-top {
   aspect-ratio: 1 / 1;
   object-fit: cover;
+}
+
+.x-small {
+  font-size: 0.65rem;
 }
 .card-clickable {
   cursor: pointer;

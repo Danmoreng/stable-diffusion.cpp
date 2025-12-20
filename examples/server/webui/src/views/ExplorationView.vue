@@ -9,10 +9,6 @@ const generationStore = useGenerationStore();
 
 onMounted(() => {
   explorationStore.syncFromGenerationStore();
-  
-  if (explorationStore.neighborCells.length === 0) {
-    explorationStore.refreshVariations();
-  }
 });
 
 const gridCells = computed(() => {

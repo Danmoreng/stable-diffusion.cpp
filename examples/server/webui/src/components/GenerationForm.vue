@@ -209,7 +209,7 @@ const clearInitImage = () => {
             v-model.number="store.cfgScale"
             min="1"
             max="30"
-            step="0.5"
+            step="0.1"
             class="form-control"
           />
         </div>
