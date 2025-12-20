@@ -25,6 +25,7 @@ export const useGenerationStore = defineStore('generation', () => {
   const isModelSwitching = ref(false)
   const imageUrls = ref<string[]>([])
   const error = ref<string | null>(null)
+  const lastParams = ref<any>(null)
 
   // State for parameters
   const prompt = ref(initialState.prompt)
@@ -292,6 +293,7 @@ export const useGenerationStore = defineStore('generation', () => {
     isGenerating.value = true
     imageUrls.value = []
     error.value = null
+    lastParams.value = { ...params }
     startStreamingProgress();
 
     try {
@@ -305,5 +307,5 @@ export const useGenerationStore = defineStore('generation', () => {
     }
   }
 
-  return { isGenerating, isModelSwitching, imageUrls, error, generateImage, requestImage, prompt, negativePrompt, steps, seed, cfgScale, strength, batchCount, sampler, samplers, width, height, isSidebarCollapsed, toggleSidebar, theme, toggleTheme, saveImages, initImage, models, currentModel, isModelsLoading, fetchModels, loadModel, progressStep, progressSteps, progressTime, progressPhase, eta, startStreamingProgress, stopStreamingProgress }
+  return { isGenerating, isModelSwitching, imageUrls, error, generateImage, requestImage, prompt, negativePrompt, steps, seed, cfgScale, strength, batchCount, sampler, samplers, width, height, isSidebarCollapsed, toggleSidebar, theme, toggleTheme, saveImages, initImage, models, currentModel, isModelsLoading, fetchModels, loadModel, progressStep, progressSteps, progressTime, progressPhase, eta, startStreamingProgress, stopStreamingProgress, lastParams }
 })

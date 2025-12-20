@@ -16,6 +16,90 @@ const images = ref<HistoryItem[]>([])
 const isLoading = ref(true)
 const error = ref<string | null>(null)
 
+// Filtering State
+const selectedModel = ref('all')
+const selectedDateRange = ref('all') // all, today, yesterday, week, month, custom
+const startDate = ref('')
+const endDate = ref('')
+
+const availableModels = computed(() => {
+  const models = new Set<string>()
+  images.value.forEach(img => {
+    if (img.params?.model) models.add(img.params.model)
+  })
+  return Array.from(models).sort()
+})
+
+const getTimestamp = (filename: string) => {
+  try {
+    const parts = filename.split('-')
+    if (parts.length >= 2) {
+      return parseInt(parts[1]) / 1000
+    }
+  } catch (e) { /* ignore */ }
+  return 0
+}
+
+const filteredImages = computed(() => {
+  let result = images.value
+
+  // Filter by model
+  if (selectedModel.value !== 'all') {
+    result = result.filter(img => img.params?.model === selectedModel.value)
+  }
+
+  // Filter by date range preset
+  if (selectedDateRange.value !== 'all') {
+    const now = new Date()
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()
+    
+    if (selectedDateRange.value === 'custom') {
+      if (startDate.value) {
+        const start = new Date(startDate.value).getTime()
+        result = result.filter(img => getTimestamp(img.name) >= start)
+      }
+      if (endDate.value) {
+        const end = new Date(endDate.value).getTime()
+        result = result.filter(img => getTimestamp(img.name) <= end)
+      }
+    } else {
+      const yesterday = today - 86400000
+      const lastWeek = today - 7 * 86400000
+      const lastMonth = today - 30 * 86400000
+
+      result = result.filter(img => {
+        const ts = getTimestamp(img.name)
+        if (selectedDateRange.value === 'today') return ts >= today
+        if (selectedDateRange.value === 'yesterday') return ts >= yesterday && ts < today
+        if (selectedDateRange.value === 'week') return ts >= lastWeek
+        if (selectedDateRange.value === 'month') return ts >= lastMonth
+        return true
+      })
+    }
+  }
+
+  return result
+})
+
+// Format timestamp from filename (img-MICROSECONDS-SEED.png)
+const formatDate = (filename: string) => {
+  try {
+    const parts = filename.split('-')
+    if (parts.length >= 2) {
+      const ms = parseInt(parts[1]) / 1000
+      return new Date(ms).toLocaleString(undefined, {
+        month: 'short',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit'
+      })
+    }
+  } catch (e) {
+    /* ignore */
+  }
+  return filename
+}
+
 const modalElement = ref<HTMLElement | null>(null)
 const carouselElement = ref<HTMLElement | null>(null)
 let modalInstance: Modal | null = null
@@ -32,7 +116,17 @@ const setColumns = (count: number) => {
 }
 
 // Expose for parent component
-defineExpose({ columnsPerRow, setColumns })
+defineExpose({ 
+  columnsPerRow, 
+  setColumns, 
+  selectedModel, 
+  selectedDateRange, 
+  startDate, 
+  endDate, 
+  availableModels,
+  filteredCount: computed(() => filteredImages.value.length),
+  totalCount: computed(() => images.value.length)
+})
 
 async function fetchImages() {
   isLoading.value = true
@@ -78,7 +172,7 @@ function openModal(index: number) {
 }
 
 function reuseParameters(navigate = true) {
-  const item = images.value[activeIndex.value]
+  const item = filteredImages.value[activeIndex.value]
   if (item && item.params) {
     const p = item.params
     if (p.prompt) store.prompt = p.prompt
@@ -110,7 +204,7 @@ function reuseParameters(navigate = true) {
 }
 
 async function sendToImg2Img() {
-  const item = images.value[activeIndex.value]
+  const item = filteredImages.value[activeIndex.value]
   if (!item) return
   
   const imageUrl = '/outputs/' + item.name
@@ -161,74 +255,95 @@ onMounted(() => {
       <p>Generate some images with the "Save Images Automatically" setting enabled.</p>
     </div>
 
-    <!-- Image Grid (Custom CSS Grid) -->
-    <div v-else class="custom-gallery-grid" :style="{ '--cols': columnsPerRow }">
-      <div v-for="(image, index) in images" :key="image.name" class="gallery-item">
-        <div class="card card-clickable shadow-sm h-100 border-0 bg-dark bg-opacity-10" @click="openModal(index)">
-          <img :src="'/outputs/' + image.name" class="card-img-top" :alt="image.name" loading="lazy" />
-          <div class="card-footer p-1 text-truncate x-small text-muted text-center border-0 bg-transparent">
-            {{ image.name.substring(4, 14) }}
+    <template v-else>
+      <!-- Image Grid (Custom CSS Grid) -->
+      <div v-if="filteredImages.length > 0" class="custom-gallery-grid" :style="{ '--cols': columnsPerRow }">
+        <div v-for="(image, index) in filteredImages" :key="image.name" class="gallery-item">
+          <div class="card card-clickable shadow-sm h-100 border-0 bg-dark bg-opacity-10" @click="openModal(index)">
+            <img :src="'/outputs/' + image.name" class="card-img-top" :alt="image.name" loading="lazy" />
+            <div class="card-footer p-2 x-small border-0 bg-transparent">
+              <div class="d-flex justify-content-between text-muted mb-1">
+                <span class="text-truncate me-1" :title="image.name">{{ formatDate(image.name) }}</span>
+                <span class="fw-bold text-primary">#{{ image.params?.seed || '?' }}</span>
+              </div>
+              <div v-if="image.params?.model" class="text-truncate text-secondary opacity-75" :title="image.params.model">
+                <i class="bi bi-box small"></i> {{ image.params.model }}
+              </div>
+            </div>
           </div>
         </div>
       </div>
-    </div>
+      
+      <!-- No Results -->
+      <div v-else class="text-center my-5 text-muted">
+        <i class="bi bi-search display-4"></i>
+        <p class="mt-2">No images match your current filters.</p>
+        <button class="btn btn-sm btn-link" @click="selectedModel = 'all'; selectedDateRange = 'all'; startDate = ''; endDate = ''">Reset Filters</button>
+      </div>
+    </template>
 
     <!-- Modal -->
-    <div class="modal fade" ref="modalElement" tabindex="-1" aria-labelledby="imageModalLabel" aria-hidden="true">
-      <div class="modal-dialog modal-xl modal-dialog-centered">
-        <div class="modal-content shadow-lg">
-          <div class="modal-header">
-            <h5 class="modal-title" id="imageModalLabel">
-              {{ images[activeIndex]?.name || 'Image Viewer' }}
-            </h5>
-            <div class="ms-auto me-2 d-flex gap-2">
-              <button 
-                class="btn btn-outline-success btn-sm"
-                @click="sendToImg2Img"
-              >
-                <i class="bi bi-image"></i> Send to Img2Img
-              </button>
-              <button 
-                v-if="images[activeIndex]?.params" 
-                class="btn btn-outline-primary btn-sm"
-                @click="reuseParameters(true)"
-              >
-                <i class="bi bi-arrow-repeat"></i> Reuse Parameters
-              </button>
-            </div>
-            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-          </div>
-          <div class="modal-body p-0 bg-black">
-            <!-- Carousel -->
-            <div ref="carouselElement" id="imageHistoryCarousel" class="carousel slide">
-              <div class="carousel-inner">
-                <div v-for="(image, index) in images" :key="`carousel-${image.name}`" class="carousel-item" :class="{ active: index === activeIndex }">
-                  <img :src="'/outputs/' + image.name" class="d-block w-100" :alt="image.name">
-                </div>
+    <Teleport to="body">
+      <div class="modal fade" ref="modalElement" tabindex="-1" aria-labelledby="imageModalLabel" aria-hidden="true">
+        <div class="modal-dialog modal-xl modal-dialog-centered">
+          <div class="modal-content shadow-lg">
+            <div class="modal-header">
+              <h5 class="modal-title" id="imageModalLabel">
+                {{ filteredImages[activeIndex]?.name || 'Image Viewer' }}
+                <small v-if="filteredImages[activeIndex]?.params?.model" class="text-muted ms-2 fs-6 fw-normal">
+                  [{{ filteredImages[activeIndex].params.model }}]
+                </small>
+              </h5>
+              <div class="ms-auto me-2 d-flex gap-2">
+                <button 
+                  class="btn btn-outline-success btn-sm"
+                  @click="sendToImg2Img"
+                >
+                  <i class="bi bi-image"></i> Send to Img2Img
+                </button>
+                <button 
+                  v-if="filteredImages[activeIndex]?.params" 
+                  class="btn btn-outline-primary btn-sm"
+                  @click="reuseParameters(true)"
+                >
+                  <i class="bi bi-arrow-repeat"></i> Reuse Parameters
+                </button>
               </div>
-              <button class="carousel-control-prev" type="button" data-bs-target="#imageHistoryCarousel" data-bs-slide="prev">
-                <span class="carousel-control-prev-icon" aria-hidden="true"></span>
-                <span class="visually-hidden">Previous</span>
-              </button>
-              <button class="carousel-control-next" type="button" data-bs-target="#imageHistoryCarousel" data-bs-slide="next">
-                <span class="carousel-control-next-icon" aria-hidden="true"></span>
-                <span class="visually-hidden">Next</span>
-              </button>
+              <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
             </div>
-          </div>
-          <div class="modal-footer justify-content-start" v-if="images[activeIndex]?.params">
-             <div class="small w-100 text-muted overflow-auto" style="max-height: 100px;">
-                <strong>Prompt:</strong> {{ images[activeIndex].params.prompt }}<br>
-                <strong>Seed:</strong> {{ images[activeIndex].params.seed }} |
-                <strong>Steps:</strong> {{ images[activeIndex].params.sample_steps }} |
-                <strong>CFG:</strong> {{ images[activeIndex].params.cfg_scale }} |
-                <strong>Sampler:</strong> {{ images[activeIndex].params.sampling_method }} |
-                <strong>Size:</strong> {{ images[activeIndex].params.width }}x{{ images[activeIndex].params.height }}
-             </div>
+                        <div class="modal-body p-0 bg-black d-flex align-items-center justify-content-center" style="height: 80vh;">
+                          <!-- Carousel -->
+                          <div ref="carouselElement" id="imageHistoryCarousel" class="carousel slide w-100 h-100">
+                            <div class="carousel-inner h-100">
+                              <div v-for="(image, index) in filteredImages" :key="`carousel-${image.name}`" class="carousel-item h-100" :class="{ active: index === activeIndex }">
+                                <div class="d-flex align-items-center justify-content-center h-100">
+                                  <img :src="'/outputs/' + image.name" class="d-block mx-auto" :alt="image.name">
+                                </div>
+                              </div>
+                            </div>                <button class="carousel-control-prev" type="button" data-bs-target="#imageHistoryCarousel" data-bs-slide="prev">
+                  <span class="carousel-control-prev-icon" aria-hidden="true"></span>
+                  <span class="visually-hidden">Previous</span>
+                </button>
+                <button class="carousel-control-next" type="button" data-bs-target="#imageHistoryCarousel" data-bs-slide="next">
+                  <span class="carousel-control-next-icon" aria-hidden="true"></span>
+                  <span class="visually-hidden">Next</span>
+                </button>
+              </div>
+            </div>
+            <div class="modal-footer justify-content-start" v-if="filteredImages[activeIndex]?.params">
+               <div class="small w-100 text-muted overflow-auto" style="max-height: 100px;">
+                  <strong>Prompt:</strong> {{ filteredImages[activeIndex].params.prompt }}<br>
+                  <strong>Seed:</strong> {{ filteredImages[activeIndex].params.seed }} |
+                  <strong>Steps:</strong> {{ filteredImages[activeIndex].params.sample_steps }} |
+                  <strong>CFG:</strong> {{ filteredImages[activeIndex].params.cfg_scale }} |
+                  <strong>Sampler:</strong> {{ filteredImages[activeIndex].params.sampling_method }} |
+                  <strong>Size:</strong> {{ filteredImages[activeIndex].params.width }}x{{ filteredImages[activeIndex].params.height }}
+               </div>
+            </div>
           </div>
         </div>
       </div>
-    </div>
+    </Teleport>
 
   </div>
 </template>
@@ -260,7 +375,34 @@ onMounted(() => {
   transform: scale(1.03);
 }
 .modal-body img {
-  max-height: 80vh;
+  max-height: 100%;
+  max-width: 100%;
+  width: auto;
+  height: auto;
   object-fit: contain;
+}
+
+/* Enhanced Carousel Controls */
+.carousel-control-prev,
+.carousel-control-next {
+  width: 10%;
+  opacity: 0.7;
+  z-index: 5;
+}
+
+.carousel-control-prev-icon,
+.carousel-control-next-icon {
+  background-color: rgba(0, 0, 0, 0.5);
+  background-size: 60%;
+  border-radius: 50%;
+  width: 3rem;
+  height: 3rem;
+  transition: all 0.2s ease;
+}
+
+.carousel-control-prev:hover .carousel-control-prev-icon,
+.carousel-control-next:hover .carousel-control-next-icon {
+  background-color: rgba(0, 0, 0, 0.8);
+  transform: scale(1.1);
 }
 </style>

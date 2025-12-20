@@ -86,27 +86,27 @@ function sendToImg2Img(url: string) {
       </div>
 
       <!-- Metadata Section -->
-      <div v-if="store.imageUrls.length > 0 && !store.isGenerating" class="metadata-pane p-3 rounded bg-body-secondary small">
+      <div v-if="store.imageUrls.length > 0 && !store.isGenerating && store.lastParams" class="metadata-pane p-3 rounded bg-body-secondary small">
         <div class="mb-2">
           <span class="fw-bold text-muted text-uppercase x-small d-block mb-1">Prompt</span>
-          <div class="prompt-text">{{ store.prompt }}</div>
+          <div class="prompt-text">{{ store.lastParams.prompt }}</div>
         </div>
         <div class="row g-3">
           <div class="col-6 col-md-3">
             <span class="fw-bold text-muted text-uppercase x-small d-block mb-1">Dimensions</span>
-            {{ store.width }} x {{ store.height }}
+            {{ store.lastParams.width }} x {{ store.lastParams.height }}
           </div>
           <div class="col-6 col-md-3">
             <span class="fw-bold text-muted text-uppercase x-small d-block mb-1">Steps</span>
-            {{ store.steps }}
+            {{ store.lastParams.steps }}
           </div>
           <div class="col-6 col-md-3">
             <span class="fw-bold text-muted text-uppercase x-small d-block mb-1">CFG Scale</span>
-            {{ store.cfgScale }}
+            {{ store.lastParams.cfgScale }}
           </div>
           <div class="col-6 col-md-3">
             <span class="fw-bold text-muted text-uppercase x-small d-block mb-1">Sampler</span>
-            {{ store.sampler }}
+            {{ store.lastParams.sampler }}
           </div>
         </div>
       </div>
