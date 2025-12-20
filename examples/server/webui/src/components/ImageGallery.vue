@@ -203,6 +203,27 @@ function reuseParameters(navigate = true) {
   }
 }
 
+function getFormattedParams(item: HistoryItem) {
+  if (!item || !item.params) return ''
+  const p = item.params
+  let s = `${p.prompt}\n`
+  if (p.negative_prompt) {
+    s += `Negative prompt: ${p.negative_prompt}\n`
+  }
+  s += `Steps: ${p.sample_steps}, `
+  s += `Sampler: ${p.sampling_method}, `
+  s += `CFG scale: ${p.cfg_scale}, `
+  s += `Seed: ${p.seed}, `
+  s += `Size: ${p.width}x${p.height}, `
+  if (p.model) s += `Model: ${p.model}, `
+  s += `Version: stable-diffusion.cpp`
+  return s
+}
+
+function copyToClipboard(text: string) {
+  navigator.clipboard.writeText(text)
+}
+
 async function sendToImg2Img() {
   const item = filteredImages.value[activeIndex.value]
   if (!item) return
@@ -331,13 +352,26 @@ onMounted(() => {
               </div>
             </div>
             <div class="modal-footer justify-content-start" v-if="filteredImages[activeIndex]?.params">
-               <div class="small w-100 text-muted overflow-auto" style="max-height: 100px;">
-                  <strong>Prompt:</strong> {{ filteredImages[activeIndex].params.prompt }}<br>
-                  <strong>Seed:</strong> {{ filteredImages[activeIndex].params.seed }} |
-                  <strong>Steps:</strong> {{ filteredImages[activeIndex].params.sample_steps }} |
-                  <strong>CFG:</strong> {{ filteredImages[activeIndex].params.cfg_scale }} |
-                  <strong>Sampler:</strong> {{ filteredImages[activeIndex].params.sampling_method }} |
-                  <strong>Size:</strong> {{ filteredImages[activeIndex].params.width }}x{{ filteredImages[activeIndex].params.height }}
+               <div class="small w-100 text-muted overflow-auto" style="max-height: 150px;">
+                  <div class="d-flex justify-content-between align-items-start">
+                    <div>
+                      <strong>Prompt:</strong> {{ filteredImages[activeIndex].params.prompt }}<br>
+                      <strong>Seed:</strong> {{ filteredImages[activeIndex].params.seed }} |
+                      <strong>Steps:</strong> {{ filteredImages[activeIndex].params.sample_steps }} |
+                      <strong>CFG:</strong> {{ filteredImages[activeIndex].params.cfg_scale }} |
+                      <strong>Sampler:</strong> {{ filteredImages[activeIndex].params.sampling_method }} |
+                      <strong>Size:</strong> {{ filteredImages[activeIndex].params.width }}x{{ filteredImages[activeIndex].params.height }}
+                    </div>
+                  </div>
+                  <div class="mt-2 pt-2 border-top">
+                    <div class="d-flex justify-content-between align-items-center mb-1">
+                      <strong>Forge Format:</strong>
+                      <button class="btn btn-link btn-sm p-0 text-decoration-none x-small" @click="copyToClipboard(getFormattedParams(filteredImages[activeIndex]))">
+                        <i class="bi bi-clipboard"></i> Copy
+                      </button>
+                    </div>
+                    <pre class="bg-dark bg-opacity-10 p-2 rounded x-small mb-0 text-break-all white-space-pre-wrap">{{ getFormattedParams(filteredImages[activeIndex]) }}</pre>
+                  </div>
                </div>
             </div>
           </div>
@@ -366,6 +400,12 @@ onMounted(() => {
 
 .x-small {
   font-size: 0.65rem;
+}
+.text-break-all {
+  word-break: break-all;
+}
+.white-space-pre-wrap {
+  white-space: pre-wrap;
 }
 .card-clickable {
   cursor: pointer;

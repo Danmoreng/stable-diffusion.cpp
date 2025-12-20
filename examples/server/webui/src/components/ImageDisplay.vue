@@ -1,9 +1,39 @@
 <script setup lang="ts">
+import { computed } from 'vue'
 import { useGenerationStore } from '@/stores/generation'
 import { useRouter } from 'vue-router'
 
 const store = useGenerationStore()
 const router = useRouter()
+
+const parametersString = computed(() => {
+  if (!store.lastParams) return ''
+  const p = store.lastParams
+  const modelName = store.models.find(m => m.id === store.currentModel)?.id || 'unknown'
+  
+  let s = `${p.prompt}\n`
+  if (p.negative_prompt) {
+    s += `Negative prompt: ${p.negative_prompt}\n`
+  }
+  
+  const samplerName = p.sampler.toLowerCase().replace(' a', '_a').replace(/\+\+/g, 'pp')
+  
+  s += `Steps: ${p.steps}, `
+  s += `Sampler: ${samplerName}, `
+  s += `CFG scale: ${p.cfgScale}, `
+  s += `Seed: ${p.seed}, `
+  s += `Size: ${p.width}x${p.height}, `
+  s += `Model: ${modelName}, `
+  s += `Version: stable-diffusion.cpp`
+  
+  return s
+})
+
+function copyParameters() {
+  if (parametersString.value) {
+    navigator.clipboard.writeText(parametersString.value)
+  }
+}
 
 function sendToImg2Img(url: string) {
   store.initImage = url
@@ -109,12 +139,28 @@ function sendToImg2Img(url: string) {
             {{ store.lastParams.sampler }}
           </div>
         </div>
+        
+        <div class="mt-3 pt-3 border-top">
+          <div class="d-flex justify-content-between align-items-center mb-1">
+            <span class="fw-bold text-muted text-uppercase x-small">A1111 / Forge Format</span>
+            <button class="btn btn-link btn-sm p-0 text-decoration-none x-small" @click="copyParameters">
+              <i class="bi bi-clipboard"></i> Copy
+            </button>
+          </div>
+          <pre class="bg-dark bg-opacity-25 p-2 rounded x-small mb-0 text-break-all white-space-pre-wrap">{{ parametersString }}</pre>
+        </div>
       </div>
     </div>
   </div>
 </template>
 
 <style scoped>
+.text-break-all {
+  word-break: break-all;
+}
+.white-space-pre-wrap {
+  white-space: pre-wrap;
+}
 .image-display-container {
   min-height: 450px;
 }

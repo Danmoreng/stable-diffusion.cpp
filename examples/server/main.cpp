@@ -62,108 +62,91 @@ void set_progress_phase(const std::string& phase) {
 }
 
 static void load_model_config(SDContextParams& ctx_params, const std::string& model_path_str, const std::string& model_dir) {
-
     if (model_path_str.empty()) return;
 
-    
-
     fs::path model_path(model_path_str);
-
     fs::path config_path;
 
-    
-
     if (model_path.is_absolute()) {
-
         config_path = model_path;
-
     } else {
-
         config_path = fs::path(model_dir) / model_path;
-
     }
-
     config_path += ".json";
 
-
-
-
-
     if (fs::exists(config_path)) {
-
         LOG_INFO("Loading model config: %s", config_path.string().c_str());
-
         try {
-
             std::ifstream f(config_path);
-
             json cfg = json::parse(f);
 
-
-
             auto resolve = [&](const std::string& p) -> std::string {
-
                 if (p.empty()) return "";
-
                 fs::path fp(p);
-
                 if (fp.is_absolute()) return p;
-
                 return (fs::path(model_dir) / p).string();
-
             };
 
-
-
             if (cfg.contains("vae")) ctx_params.vae_path = resolve(cfg["vae"]);
+            else if (cfg.contains("vae_path")) ctx_params.vae_path = resolve(cfg["vae_path"]);
+            else if (cfg.contains("ae")) ctx_params.vae_path = resolve(cfg["ae"]);
 
             if (cfg.contains("clip_l")) ctx_params.clip_l_path = resolve(cfg["clip_l"]);
+            else if (cfg.contains("clip_l_path")) ctx_params.clip_l_path = resolve(cfg["clip_l_path"]);
+            else if (cfg.contains("clip_path")) ctx_params.clip_l_path = resolve(cfg["clip_path"]);
 
             if (cfg.contains("clip_g")) ctx_params.clip_g_path = resolve(cfg["clip_g"]);
+            else if (cfg.contains("clip_g_path")) ctx_params.clip_g_path = resolve(cfg["clip_g_path"]);
 
-                                    if (cfg.contains("t5xxl")) ctx_params.t5xxl_path = resolve(cfg["t5xxl"]);
+            if (cfg.contains("t5xxl")) ctx_params.t5xxl_path = resolve(cfg["t5xxl"]);
+            else if (cfg.contains("t5xxl_path")) ctx_params.t5xxl_path = resolve(cfg["t5xxl_path"]);
 
-                                    if (cfg.contains("llm")) ctx_params.llm_path = resolve(cfg["llm"]);
+            if (cfg.contains("llm")) ctx_params.llm_path = resolve(cfg["llm"]);
+            else if (cfg.contains("llm_path")) ctx_params.llm_path = resolve(cfg["llm_path"]);
 
-                                    if (cfg.contains("clip_on_cpu")) ctx_params.clip_on_cpu = cfg["clip_on_cpu"];
+            if (cfg.contains("clip_on_cpu")) ctx_params.clip_on_cpu = cfg["clip_on_cpu"];
+            if (cfg.contains("vae_on_cpu")) ctx_params.vae_on_cpu = cfg["vae_on_cpu"];
+            if (cfg.contains("offload_to_cpu")) ctx_params.offload_params_to_cpu = cfg["offload_to_cpu"];
+            if (cfg.contains("flash_attn")) ctx_params.diffusion_flash_attn = cfg["flash_attn"];
+            if (cfg.contains("vae_tiling")) ctx_params.vae_tiling_params.enabled = cfg["vae_tiling"];
 
-                                    if (cfg.contains("vae_on_cpu")) ctx_params.vae_on_cpu = cfg["vae_on_cpu"];
-
-                                    if (cfg.contains("offload_to_cpu")) ctx_params.offload_params_to_cpu = cfg["offload_to_cpu"];
-
-                                    if (cfg.contains("flash_attn")) ctx_params.diffusion_flash_attn = cfg["flash_attn"];
-
-                                    if (cfg.contains("vae_tiling")) ctx_params.vae_tiling_params.enabled = cfg["vae_tiling"];
-
-                        
-
-                                    LOG_INFO("Config applied: vae=%s, clip_l=%s, t5=%s, clip_on_cpu=%s, flash_attn=%s",
-
-                                             ctx_params.vae_path.c_str(),
-
-                                             ctx_params.clip_l_path.c_str(),
-
-                                             ctx_params.t5xxl_path.c_str(),
-
-                                             ctx_params.clip_on_cpu ? "true" : "false",
-
-                                             ctx_params.diffusion_flash_attn ? "true" : "false");
-
-                        
-
-            
+            LOG_INFO("Config applied: vae=%s, clip_l=%s, t5=%s, clip_on_cpu=%s, flash_attn=%s",
+                     ctx_params.vae_path.c_str(),
+                     ctx_params.clip_l_path.c_str(),
+                     ctx_params.t5xxl_path.c_str(),
+                     ctx_params.clip_on_cpu ? "true" : "false",
+                     ctx_params.diffusion_flash_attn ? "true" : "false");
 
         } catch (const std::exception& e) {
-
             LOG_WARN("Failed to parse model config: %s", e.what());
-
         }
-
     }
-
 }
 
+static std::string get_image_params(const SDContextParams& ctx_params, const SDGenerationParams& gen_params, int64_t seed) {
+    std::string parameter_string = gen_params.prompt + "\n";
+    if (gen_params.negative_prompt.size() != 0) {
+        parameter_string += "Negative prompt: " + gen_params.negative_prompt + "\n";
+    }
+    parameter_string += "Steps: " + std::to_string(gen_params.sample_params.sample_steps) + ", ";
+    parameter_string += "Sampler: " + std::string(sd_sample_method_name(gen_params.sample_params.sample_method));
+    if (gen_params.sample_params.scheduler != SCHEDULER_COUNT) {
+        parameter_string += " " + std::string(sd_scheduler_name(gen_params.sample_params.scheduler));
+    }
+    parameter_string += ", CFG scale: " + std::to_string(gen_params.sample_params.guidance.txt_cfg) + ", ";
+    parameter_string += "Seed: " + std::to_string(seed) + ", ";
+    parameter_string += "Size: " + std::to_string(gen_params.width) + "x" + std::to_string(gen_params.height) + ", ";
+    parameter_string += "Model: " + sd_basename(ctx_params.diffusion_model_path.empty() ? ctx_params.model_path : ctx_params.diffusion_model_path) + ", ";
 
+    if (!ctx_params.vae_path.empty()) {
+        parameter_string += "VAE: " + sd_basename(ctx_params.vae_path) + ", ";
+    }
+    if (gen_params.clip_skip != -1) {
+        parameter_string += "Clip skip: " + std::to_string(gen_params.clip_skip) + ", ";
+    }
+    parameter_string += "Version: stable-diffusion.cpp";
+    return parameter_string;
+}
 
 static const std::string base64_chars =
 
@@ -235,6 +218,75 @@ std::vector<uint8_t> base64_decode(const std::string& encoded_string) {
     }
 
     return ret;
+}
+
+static json parse_image_params(const std::string& txt) {
+    json j;
+    std::istringstream stream(txt);
+    std::string line;
+    std::string positive_prompt;
+    std::string negative_prompt;
+    bool in_positive = true;
+    bool in_negative = false;
+
+    while (std::getline(stream, line)) {
+        if (line.empty()) continue;
+        
+        if (line.find("Negative prompt: ") == 0) {
+            negative_prompt = line.substr(17);
+            in_positive = false;
+            in_negative = true;
+            continue;
+        }
+
+        // The parameters line usually starts with "Steps: "
+        if (line.find("Steps: ") == 0) {
+            in_positive = false;
+            in_negative = false;
+            
+            // Parse comma-separated key-value pairs
+            std::istringstream line_stream(line);
+            std::string pair;
+            while (std::getline(line_stream, pair, ',')) {
+                size_t colon_pos = pair.find(':');
+                if (colon_pos != std::string::npos) {
+                    std::string key = pair.substr(0, colon_pos);
+                    std::string val = pair.substr(colon_pos + 1);
+                    
+                    // Trim key and val
+                    key.erase(0, key.find_first_not_of(" \t"));
+                    key.erase(key.find_last_not_of(" \t") + 1);
+                    val.erase(0, val.find_first_not_of(" \t"));
+                    val.erase(val.find_last_not_of(" \t") + 1);
+
+                    if (key == "Steps") j["sample_steps"] = std::stoi(val);
+                    else if (key == "CFG scale") j["cfg_scale"] = std::stof(val);
+                    else if (key == "Seed") j["seed"] = std::stoll(val);
+                    else if (key == "Sampler") j["sampling_method"] = val;
+                    else if (key == "Model") j["model"] = val;
+                    else if (key == "Clip skip") j["clip_skip"] = std::stoi(val);
+                    else if (key == "Size") {
+                        auto x_pos = val.find('x');
+                        if (x_pos != std::string::npos) {
+                            j["width"] = std::stoi(val.substr(0, x_pos));
+                            j["height"] = std::stoi(val.substr(x_pos + 1));
+                        }
+                    }
+                }
+            }
+            continue;
+        }
+
+        if (in_positive) {
+            positive_prompt += (positive_prompt.empty() ? "" : "\n") + line;
+        } else if (in_negative) {
+            negative_prompt += (negative_prompt.empty() ? "" : "\n") + line;
+        }
+    }
+
+    j["prompt"] = positive_prompt;
+    j["negative_prompt"] = negative_prompt;
+    return j;
 }
 
 std::string iso_timestamp_now() {
@@ -781,15 +833,29 @@ int main(int argc, const char** argv) {
                     json item;
                     item["name"] = img_path.filename().string();
                     
-                    // Try to load matching .json metadata
-                    auto json_path = img_path;
-                    json_path.replace_extension(".json");
-                    if (fs::exists(json_path)) {
+                    // Try to load matching .txt metadata first
+                    auto txt_path = img_path;
+                    txt_path.replace_extension(".txt");
+                    if (fs::exists(txt_path)) {
                         try {
-                            std::ifstream json_file(json_path);
-                            item["params"] = json::parse(json_file);
+                            std::ifstream txt_file(txt_path);
+                            std::string content((std::istreambuf_iterator<char>(txt_file)),
+                                                (std::istreambuf_iterator<char>()));
+                            item["params"] = parse_image_params(content);
                         } catch (...) {
-                            LOG_WARN("failed to parse metadata: %s", json_path.string().c_str());
+                            LOG_WARN("failed to parse txt metadata: %s", txt_path.string().c_str());
+                        }
+                    } else {
+                        // Fallback to .json
+                        auto json_path = img_path;
+                        json_path.replace_extension(".json");
+                        if (fs::exists(json_path)) {
+                            try {
+                                std::ifstream json_file(json_path);
+                                item["params"] = json::parse(json_file);
+                            } catch (...) {
+                                LOG_WARN("failed to parse json metadata: %s", json_path.string().c_str());
+                            }
                         }
                     }
                     image_list.push_back(item);
@@ -1001,27 +1067,13 @@ int main(int argc, const char** argv) {
                         file.write(reinterpret_cast<const char*>(image_bytes.data()), image_bytes.size());
                         LOG_INFO("saved image to %s", img_filename.c_str());
 
-                        // Save parameters as JSON
-                        std::string json_filename = output_dir + "/" + base_filename + ".json";
-                        json meta = j; // The original request JSON
+                        // Save parameters as TXT (WebUI compatible)
+                        std::string txt_filename = output_dir + "/" + base_filename + ".txt";
+                        std::string params_txt = get_image_params(ctx_params, gen_params, gen_params.seed);
                         
-                        bool has_init = meta.contains("init_image");
-                        if (has_init) {
-                            meta.erase("init_image");
-                        }
-                        meta["is_img2img"] = has_init;
-                        meta["seed"] = gen_params.seed;
-
-                        // Add current model name
-                        std::string active_model = fs::path(ctx_params.diffusion_model_path).filename().string();
-                        if (active_model.empty()) {
-                            active_model = fs::path(ctx_params.model_path).filename().string();
-                        }
-                        meta["model"] = active_model;
-                        
-                        std::ofstream json_file(json_filename);
-                        json_file << meta.dump(4);
-                        LOG_INFO("saved parameters to %s", json_filename.c_str());
+                        std::ofstream txt_file(txt_filename);
+                        txt_file << params_txt;
+                        LOG_INFO("saved parameters to %s", txt_filename.c_str());
 
                     } catch (const std::exception& e) {
                         LOG_ERROR("failed to save image or metadata: %s", e.what());

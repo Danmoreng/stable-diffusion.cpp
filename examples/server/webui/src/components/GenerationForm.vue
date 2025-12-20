@@ -114,7 +114,18 @@ const clearInitImage = () => {
       </div>
 
       <div class="mb-3">
-        <label for="prompt" class="form-label">Prompt:</label>
+        <div class="d-flex justify-content-between align-items-center mb-2">
+          <label for="prompt" class="form-label mb-0">Prompt:</label>
+          <button 
+            v-if="store.prompt.includes('Steps: ')"
+            type="button" 
+            class="btn btn-outline-primary btn-sm py-0" 
+            style="font-size: 0.75rem;"
+            @click="store.parseA1111Parameters(store.prompt)"
+          >
+            <i class="bi bi-magic"></i> Apply Forge Parameters
+          </button>
+        </div>
         <textarea
           id="prompt"
           v-model="store.prompt"

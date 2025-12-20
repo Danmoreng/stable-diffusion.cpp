@@ -1471,6 +1471,19 @@ struct SDGenerationParams {
             }
         };
 
+        auto load_with_alias = [&](const std::string& key, const std::vector<std::string>& aliases, auto& out) {
+            if (j.contains(key)) {
+                load_if_exists(key.c_str(), out);
+            } else {
+                for (const auto& alias : aliases) {
+                    if (j.contains(alias)) {
+                        load_if_exists(alias.c_str(), out);
+                        break;
+                    }
+                }
+            }
+        };
+
         load_if_exists("prompt", prompt);
         load_if_exists("negative_prompt", negative_prompt);
         load_if_exists("easycache_option", easycache_option);
@@ -1496,7 +1509,7 @@ struct SDGenerationParams {
         load_if_exists("skip_layers", skip_layers);
         load_if_exists("high_noise_skip_layers", high_noise_skip_layers);
 
-        load_if_exists("cfg_scale", sample_params.guidance.txt_cfg);
+        load_with_alias("cfg_scale", {"guidance_scale"}, sample_params.guidance.txt_cfg);
         load_if_exists("sample_steps", sample_params.sample_steps);
         load_if_exists("img_cfg_scale", sample_params.guidance.img_cfg);
         load_if_exists("guidance", sample_params.guidance.distilled_guidance);

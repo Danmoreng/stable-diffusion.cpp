@@ -338,6 +338,84 @@ export const useGenerationStore = defineStore('generation', () => {
     return responseData.data.map((item: any) => `data:image/png;base64,${item.b64_json}`);
   }
 
+  function parseA1111Parameters(text: string) {
+    if (!text || !text.includes('Steps: ')) return false;
+
+    try {
+      const lines = text.split('\n');
+      let positivePrompt = '';
+      let negativePromptStr = '';
+      let paramsLine = '';
+
+      let mode: 'positive' | 'negative' | 'params' = 'positive';
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+
+        if (trimmed.startsWith('Negative prompt:')) {
+          negativePromptStr = trimmed.substring(16).trim();
+          mode = 'negative';
+          continue;
+        }
+
+        if (trimmed.includes('Steps: ') && (trimmed.includes('Sampler: ') || trimmed.includes('Seed: '))) {
+          paramsLine = trimmed;
+          mode = 'params';
+          continue;
+        }
+
+        if (mode === 'positive') {
+          positivePrompt += (positivePrompt ? '\n' : '') + trimmed;
+        } else if (mode === 'negative') {
+          negativePromptStr += (negativePromptStr ? '\n' : '') + trimmed;
+        }
+      }
+
+      if (paramsLine) {
+        prompt.value = positivePrompt;
+        negativePrompt.value = negativePromptStr;
+
+        const parts = paramsLine.split(',');
+        for (const part of parts) {
+          const colonIdx = part.indexOf(':');
+          if (colonIdx === -1) continue;
+
+          const key = part.substring(0, colonIdx).trim();
+          const val = part.substring(colonIdx + 1).trim();
+
+          if (key === 'Steps') steps.value = parseInt(val);
+          else if (key === 'CFG scale') cfgScale.value = parseFloat(val);
+          else if (key === 'Seed') seed.value = parseInt(val);
+          else if (key === 'Sampler') {
+            const normalizedVal = val.toLowerCase().replace('++', 'pp').replace(/[^a-z0-9]/g, '_');
+            const found = samplers.value.find(s => {
+              const normalizedS = s.toLowerCase().replace(/[^a-z0-9]/g, '_');
+              return normalizedVal.includes(normalizedS) || normalizedS.includes(normalizedVal);
+            });
+            if (found) sampler.value = found;
+          } else if (key === 'Size') {
+            const sizeParts = val.split('x');
+            if (sizeParts.length === 2) {
+              width.value = parseInt(sizeParts[0]);
+              height.value = parseInt(sizeParts[1]);
+            }
+          } else if (key === 'Model') {
+            // Find model by ID if possible
+            const found = models.value.find(m => m.id === val || m.id.endsWith(val));
+            if (found && found.id !== currentModel.value) {
+              loadModel(found.id);
+            }
+          }
+        }
+        return true;
+      }
+    } catch (e) {
+      console.error('Failed to parse A1111 parameters', e);
+    }
+    return false;
+  }
+
   async function generateImage(params: GenerationParams) {
     if (isModelSwitching.value) return;
     isGenerating.value = true
@@ -357,5 +435,5 @@ export const useGenerationStore = defineStore('generation', () => {
     }
   }
 
-  return { isGenerating, isModelSwitching, imageUrls, error, generateImage, requestImage, prompt, negativePrompt, steps, seed, cfgScale, strength, batchCount, sampler, samplers, width, height, isSidebarCollapsed, toggleSidebar, theme, toggleTheme, saveImages, initImage, models, currentModel, isModelsLoading, fetchModels, loadModel, progressStep, progressSteps, progressTime, progressPhase, eta, startStreamingProgress, stopStreamingProgress, lastParams, outputDir, modelDir, updateConfig }
+  return { isGenerating, isModelSwitching, imageUrls, error, generateImage, requestImage, parseA1111Parameters, prompt, negativePrompt, steps, seed, cfgScale, strength, batchCount, sampler, samplers, width, height, isSidebarCollapsed, toggleSidebar, theme, toggleTheme, saveImages, initImage, models, currentModel, isModelsLoading, fetchModels, loadModel, progressStep, progressSteps, progressTime, progressPhase, eta, startStreamingProgress, stopStreamingProgress, lastParams, outputDir, modelDir, updateConfig }
 })
