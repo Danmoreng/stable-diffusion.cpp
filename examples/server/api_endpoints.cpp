@@ -878,6 +878,7 @@ void handle_generate_image(const httplib::Request& req, httplib::Response& res, 
             std::string b64 = base64_encode(image_bytes);
             json item;
             item["b64_json"] = b64;
+            item["seed"] = gen_params.seed;
             out["data"].push_back(item);
         }
 
@@ -1110,6 +1111,7 @@ void handle_edit_image(const httplib::Request& req, httplib::Response& res, Serv
             std::string b64 = base64_encode(image_bytes);
             json item;
             item["b64_json"] = b64;
+            item["seed"] = gen_params.seed;
             out["data"].push_back(item);
         }
 
