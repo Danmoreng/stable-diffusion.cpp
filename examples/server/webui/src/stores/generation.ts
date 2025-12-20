@@ -48,6 +48,7 @@ export const useGenerationStore = defineStore('generation', () => {
   const theme = ref(initialState.theme as 'light' | 'dark' | 'system')
   const saveImages = ref(initialState.saveImages)
   const outputDir = ref('outputs')
+  const modelDir = ref('models')
 
   // Model Management State
   const models = ref<any[]>([])
@@ -61,6 +62,9 @@ export const useGenerationStore = defineStore('generation', () => {
       if (data.output_dir) {
         outputDir.value = data.output_dir
       }
+      if (data.model_dir) {
+        modelDir.value = data.model_dir
+      }
     } catch (e) {
       console.error('Failed to fetch config:', e)
     }
@@ -71,7 +75,10 @@ export const useGenerationStore = defineStore('generation', () => {
       await fetch('/v1/config', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ output_dir: outputDir.value })
+        body: JSON.stringify({ 
+          output_dir: outputDir.value,
+          model_dir: modelDir.value
+        })
       })
     } catch (e) {
       console.error('Failed to update config:', e)
@@ -350,5 +357,5 @@ export const useGenerationStore = defineStore('generation', () => {
     }
   }
 
-  return { isGenerating, isModelSwitching, imageUrls, error, generateImage, requestImage, prompt, negativePrompt, steps, seed, cfgScale, strength, batchCount, sampler, samplers, width, height, isSidebarCollapsed, toggleSidebar, theme, toggleTheme, saveImages, initImage, models, currentModel, isModelsLoading, fetchModels, loadModel, progressStep, progressSteps, progressTime, progressPhase, eta, startStreamingProgress, stopStreamingProgress, lastParams, outputDir, updateConfig }
+  return { isGenerating, isModelSwitching, imageUrls, error, generateImage, requestImage, prompt, negativePrompt, steps, seed, cfgScale, strength, batchCount, sampler, samplers, width, height, isSidebarCollapsed, toggleSidebar, theme, toggleTheme, saveImages, initImage, models, currentModel, isModelsLoading, fetchModels, loadModel, progressStep, progressSteps, progressTime, progressPhase, eta, startStreamingProgress, stopStreamingProgress, lastParams, outputDir, modelDir, updateConfig }
 })

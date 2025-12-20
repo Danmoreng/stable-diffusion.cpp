@@ -534,9 +534,16 @@ int main(int argc, const char** argv) {
     svr.Post("/v1/config", [&](const httplib::Request& req, httplib::Response& res) {
         try {
             json body = json::parse(req.body);
+            bool updated = false;
             if (body.contains("output_dir")) {
                 svr_params.output_dir = body["output_dir"];
                 LOG_INFO("Config updated: output_dir = %s", svr_params.output_dir.c_str());
+                updated = true;
+            }
+            if (body.contains("model_dir")) {
+                svr_params.model_dir = body["model_dir"];
+                LOG_INFO("Config updated: model_dir = %s", svr_params.model_dir.c_str());
+                updated = true;
             }
             res.set_content(R"({"status":"success"})", "application/json");
         } catch (const std::exception& e) {
