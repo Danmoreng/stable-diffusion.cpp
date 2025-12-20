@@ -445,8 +445,46 @@ int main(int argc, const char** argv) {
             LOG_DEBUG("%s\n", gen_params.to_string().c_str());
 
             sd_image_t init_image    = {(uint32_t)gen_params.width, (uint32_t)gen_params.height, 3, nullptr};
+            
+            // Handle Img2Img init_image
+            if (j.contains("init_image") && j["init_image"].is_string()) {
+                std::string b64_init = j["init_image"];
+                // Strip data:image/png;base64, prefix if present
+                if (b64_init.find("base64,") != std::string::npos) {
+                    b64_init = b64_init.substr(b64_init.find("base64,") + 7);
+                }
+                auto init_bytes = base64_decode(b64_init);
+                if (!init_bytes.empty()) {
+                    int img_w = gen_params.width;
+                    int img_h = gen_params.height;
+                    init_image.data = load_image_from_memory(
+                        reinterpret_cast<const char*>(init_bytes.data()),
+                        init_bytes.size(),
+                        img_w, img_h,
+                        gen_params.width, gen_params.height, 3);
+                    init_image.width = (uint32_t)img_w;
+                    init_image.height = (uint32_t)img_h;
+                    if (!init_image.data) {
+                        LOG_ERROR("failed to load init_image from base64");
+                    } else {
+                        LOG_INFO("loaded init_image for img2img: %dx%d", img_w, img_h);
+                    }
+                }
+            }
+
             sd_image_t control_image = {(uint32_t)gen_params.width, (uint32_t)gen_params.height, 3, nullptr};
             sd_image_t mask_image    = {(uint32_t)gen_params.width, (uint32_t)gen_params.height, 1, nullptr};
+
+            // Allocate dummy data for mask and control if not provided, to avoid crash in sd_image_to_ggml_tensor
+            if (mask_image.data == nullptr) {
+                mask_image.data = (uint8_t*)malloc(mask_image.width * mask_image.height * mask_image.channel);
+                // For Img2Img, a mask of 255 (white) means "denoise everything"
+                memset(mask_image.data, 255, mask_image.width * mask_image.height * mask_image.channel);
+            }
+            if (control_image.data == nullptr) {
+                control_image.data = (uint8_t*)calloc(1, control_image.width * control_image.height * control_image.channel);
+            }
+
             std::vector<sd_image_t> pmid_images;
 
             sd_img_gen_params_t img_gen_params = {
@@ -521,9 +559,12 @@ int main(int argc, const char** argv) {
                         // Save parameters as JSON
                         std::string json_filename = output_dir + "/" + base_filename + ".json";
                         json meta = j; // The original request JSON
-                        // Ensure it has the prompt without extra args if we were still using them, 
-                        // but now we use pure JSON, so 'j' is perfect.
-                        // We add the seed if it was random
+                        
+                        bool has_init = meta.contains("init_image");
+                        if (has_init) {
+                            meta.erase("init_image");
+                        }
+                        meta["is_img2img"] = has_init;
                         meta["seed"] = gen_params.seed;
                         
                         std::ofstream json_file(json_filename);
@@ -544,6 +585,16 @@ int main(int argc, const char** argv) {
 
             res.set_content(out.dump(), "application/json");
             res.status = 200;
+
+            if (init_image.data) {
+                stbi_image_free(init_image.data);
+            }
+            if (mask_image.data) {
+                free(mask_image.data);
+            }
+            if (control_image.data) {
+                free(control_image.data);
+            }
 
         } catch (const std::exception& e) {
             res.status = 500;

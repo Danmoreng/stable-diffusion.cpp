@@ -10,6 +10,9 @@
         <router-link to="/" class="nav-link">Text-to-Image</router-link>
       </li>
       <li class="nav-item">
+        <router-link to="/img2img" class="nav-link">Image-to-Image</router-link>
+      </li>
+      <li class="nav-item">
         <router-link to="/settings" class="nav-link">Settings</router-link>
       </li>
       <li class="nav-item">

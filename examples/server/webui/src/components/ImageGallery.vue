@@ -87,7 +87,12 @@ function reuseParameters() {
     
     // Close modal and navigate
     modalInstance?.hide()
-    router.push('/')
+    
+    if (p.is_img2img || p.init_image) {
+      router.push('/img2img')
+    } else {
+      router.push('/')
+    }
   }
 }
 
