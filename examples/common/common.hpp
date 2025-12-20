@@ -1,4 +1,6 @@
 
+#pragma once
+
 #include <filesystem>
 #include <iostream>
 #include <map>
@@ -7,6 +9,7 @@
 #include <sstream>
 #include <string>
 #include <vector>
+#include <cmath>
 
 #include <json.hpp>
 using json   = nlohmann::json;
@@ -17,29 +20,16 @@ namespace fs = std::filesystem;
 #include <windows.h>
 #endif  // _WIN32
 
-#include "stable-diffusion.h"
+#include "util.h" // For log_printf and LOG macros
 
-#define STB_IMAGE_IMPLEMENTATION
-#define STB_IMAGE_STATIC
 #include "stb_image.h"
-
-#define STB_IMAGE_WRITE_IMPLEMENTATION
-#define STB_IMAGE_WRITE_STATIC
 #include "stb_image_write.h"
-
-#define STB_IMAGE_RESIZE_IMPLEMENTATION
-#define STB_IMAGE_RESIZE_STATIC
 #include "stb_image_resize.h"
 
 #define SAFE_STR(s) ((s) ? (s) : "")
 #define BOOL_STR(b) ((b) ? "true" : "false")
 
-const char* modes_str[] = {
-    "img_gen",
-    "vid_gen",
-    "convert",
-    "upscale",
-};
+extern const char* modes_str[];
 #define SD_ALL_MODES_STR "img_gen, vid_gen, convert, upscale"
 
 enum SDMode {
@@ -50,149 +40,16 @@ enum SDMode {
     MODE_COUNT
 };
 
-#if defined(_WIN32)
-static std::string utf16_to_utf8(const std::wstring& wstr) {
-    if (wstr.empty())
-        return {};
-    int size_needed = WideCharToMultiByte(CP_UTF8, 0, wstr.data(), (int)wstr.size(),
-                                          nullptr, 0, nullptr, nullptr);
-    if (size_needed <= 0)
-        throw std::runtime_error("UTF-16 to UTF-8 conversion failed");
+// Utils
+std::string sd_basename(const std::string& path);
+std::string version_string();
+std::string argv_to_utf8(int index, const char** argv);
 
-    std::string utf8(size_needed, 0);
-    WideCharToMultiByte(CP_UTF8, 0, wstr.data(), (int)wstr.size(),
-                        (char*)utf8.data(), size_needed, nullptr, nullptr);
-    return utf8;
-}
+// Logging
+void log_print(enum sd_log_level_t level, const char* log, bool verbose, bool color);
+void set_log_verbose(bool verbose);
+void set_log_color(bool color);
 
-static std::string argv_to_utf8(int index, const char** argv) {
-    int argc;
-    wchar_t** argv_w = CommandLineToArgvW(GetCommandLineW(), &argc);
-    if (!argv_w)
-        throw std::runtime_error("Failed to parse command line");
-
-    std::string result;
-    if (index < argc) {
-        result = utf16_to_utf8(argv_w[index]);
-    }
-    LocalFree(argv_w);
-    return result;
-}
-
-#else  // Linux / macOS
-static std::string argv_to_utf8(int index, const char** argv) {
-    return std::string(argv[index]);
-}
-
-#endif
-
-static void print_utf8(FILE* stream, const char* utf8) {
-    if (!utf8)
-        return;
-
-#ifdef _WIN32
-    HANDLE h = (stream == stderr)
-                   ? GetStdHandle(STD_ERROR_HANDLE)
-                   : GetStdHandle(STD_OUTPUT_HANDLE);
-
-    int wlen = MultiByteToWideChar(CP_UTF8, 0, utf8, -1, NULL, 0);
-    if (wlen <= 0)
-        return;
-
-    wchar_t* wbuf = (wchar_t*)malloc(wlen * sizeof(wchar_t));
-    MultiByteToWideChar(CP_UTF8, 0, utf8, -1, wbuf, wlen);
-
-    DWORD written;
-    WriteConsoleW(h, wbuf, wlen - 1, &written, NULL);
-
-    free(wbuf);
-#else
-    fputs(utf8, stream);
-#endif
-}
-
-static std::string sd_basename(const std::string& path) {
-    size_t pos = path.find_last_of('/');
-    if (pos != std::string::npos) {
-        return path.substr(pos + 1);
-    }
-    pos = path.find_last_of('\\');
-    if (pos != std::string::npos) {
-        return path.substr(pos + 1);
-    }
-    return path;
-}
-
-static void log_print(enum sd_log_level_t level, const char* log, bool verbose, bool color) {
-    int tag_color;
-    const char* level_str;
-    FILE* out_stream = (level == SD_LOG_ERROR) ? stderr : stdout;
-
-    if (!log || (!verbose && level <= SD_LOG_DEBUG)) {
-        return;
-    }
-
-    switch (level) {
-        case SD_LOG_DEBUG:
-            tag_color = 37;
-            level_str = "DEBUG";
-            break;
-        case SD_LOG_INFO:
-            tag_color = 34;
-            level_str = "INFO";
-            break;
-        case SD_LOG_WARN:
-            tag_color = 35;
-            level_str = "WARN";
-            break;
-        case SD_LOG_ERROR:
-            tag_color = 31;
-            level_str = "ERROR";
-            break;
-        default: /* Potential future-proofing */
-            tag_color = 33;
-            level_str = "?????";
-            break;
-    }
-
-    if (color) {
-        fprintf(out_stream, "\033[%d;1m[%-5s]\033[0m ", tag_color, level_str);
-    } else {
-        fprintf(out_stream, "[%-5s] ", level_str);
-    }
-    print_utf8(out_stream, log);
-    fflush(out_stream);
-}
-
-#define LOG_BUFFER_SIZE 4096
-
-static bool log_verbose = false;
-static bool log_color   = false;
-
-static void log_printf(sd_log_level_t level, const char* file, int line, const char* format, ...) {
-    va_list args;
-    va_start(args, format);
-
-    static char log_buffer[LOG_BUFFER_SIZE + 1];
-    int written = snprintf(log_buffer, LOG_BUFFER_SIZE, "%s:%-4d - ", sd_basename(file).c_str(), line);
-
-    if (written >= 0 && written < LOG_BUFFER_SIZE) {
-        vsnprintf(log_buffer + written, LOG_BUFFER_SIZE - written, format, args);
-    }
-    size_t len = strlen(log_buffer);
-    if (log_buffer[len - 1] != '\n') {
-        strncat(log_buffer, "\n", LOG_BUFFER_SIZE - len);
-    }
-
-    log_print(level, log_buffer, log_verbose, log_color);
-
-    va_end(args);
-}
-
-#define LOG_DEBUG(format, ...) log_printf(SD_LOG_DEBUG, __FILE__, __LINE__, format, ##__VA_ARGS__)
-#define LOG_INFO(format, ...) log_printf(SD_LOG_INFO, __FILE__, __LINE__, format, ##__VA_ARGS__)
-#define LOG_WARN(format, ...) log_printf(SD_LOG_WARN, __FILE__, __LINE__, format, ##__VA_ARGS__)
-#define LOG_ERROR(format, ...) log_printf(SD_LOG_ERROR, __FILE__, __LINE__, format, ##__VA_ARGS__)
 
 struct StringOption {
     std::string short_name;
@@ -237,183 +94,12 @@ struct ArgOptions {
     std::vector<BoolOption> bool_options;
     std::vector<ManualOption> manual_options;
 
-    static std::string wrap_text(const std::string& text, size_t width, size_t indent) {
-        std::ostringstream oss;
-        size_t line_len = 0;
-        size_t pos      = 0;
+    static std::string wrap_text(const std::string& text, size_t width, size_t indent);
 
-        while (pos < text.size()) {
-            // Preserve manual newlines
-            if (text[pos] == '\n') {
-                oss << '\n'
-                    << std::string(indent, ' ');
-                line_len = indent;
-                ++pos;
-                continue;
-            }
-
-            // Add the character
-            oss << text[pos];
-            ++line_len;
-            ++pos;
-
-            // If the current line exceeds width, try to break at the last space
-            if (line_len >= width) {
-                std::string current = oss.str();
-                size_t back         = current.size();
-
-                // Find the last space (for a clean break)
-                while (back > 0 && current[back - 1] != ' ' && current[back - 1] != '\n')
-                    --back;
-
-                // If found a space to break on
-                if (back > 0 && current[back - 1] != '\n') {
-                    std::string before = current.substr(0, back - 1);
-                    std::string after  = current.substr(back);
-                    oss.str("");
-                    oss.clear();
-                    oss << before << "\n"
-                        << std::string(indent, ' ') << after;
-                } else {
-                    // If no space found, just break at width
-                    oss << "\n"
-                        << std::string(indent, ' ');
-                }
-                line_len = indent;
-            }
-        }
-
-        return oss.str();
-    }
-
-    void print() const {
-        constexpr size_t max_line_width = 120;
-
-        struct Entry {
-            std::string names;
-            std::string desc;
-        };
-        std::vector<Entry> entries;
-
-        auto add_entry = [&](const std::string& s, const std::string& l,
-                             const std::string& desc, const std::string& hint = "") {
-            std::ostringstream ss;
-            if (!s.empty())
-                ss << s;
-            if (!s.empty() && !l.empty())
-                ss << ", ";
-            if (!l.empty())
-                ss << l;
-            if (!hint.empty())
-                ss << " " << hint;
-            entries.push_back({ss.str(), desc});
-        };
-
-        for (auto& o : string_options)
-            add_entry(o.short_name, o.long_name, o.desc, "<string>");
-        for (auto& o : int_options)
-            add_entry(o.short_name, o.long_name, o.desc, "<int>");
-        for (auto& o : float_options)
-            add_entry(o.short_name, o.long_name, o.desc, "<float>");
-        for (auto& o : bool_options)
-            add_entry(o.short_name, o.long_name, o.desc, "");
-        for (auto& o : manual_options)
-            add_entry(o.short_name, o.long_name, o.desc);
-
-        size_t max_name_width = 0;
-        for (auto& e : entries)
-            max_name_width = std::max(max_name_width, e.names.size());
-
-        for (auto& e : entries) {
-            size_t indent            = 2 + max_name_width + 4;
-            size_t desc_width        = (max_line_width > indent ? max_line_width - indent : 40);
-            std::string wrapped_desc = wrap_text(e.desc, max_line_width, indent);
-            std::cout << "  " << std::left << std::setw(static_cast<int>(max_name_width) + 4)
-                      << e.names << wrapped_desc << "\n";
-        }
-    }
+    void print() const;
 };
 
-static bool parse_options(int argc, const char** argv, const std::vector<ArgOptions>& options_list) {
-    bool invalid_arg = false;
-    std::string arg;
-
-    auto match_and_apply = [&](auto& opts, auto&& apply_fn) -> bool {
-        for (auto& option : opts) {
-            if ((option.short_name.size() > 0 && arg == option.short_name) ||
-                (option.long_name.size() > 0 && arg == option.long_name)) {
-                apply_fn(option);
-                return true;
-            }
-        }
-        return false;
-    };
-
-    for (int i = 1; i < argc; i++) {
-        arg            = argv[i];
-        bool found_arg = false;
-
-        for (auto& options : options_list) {
-            if (match_and_apply(options.string_options, [&](auto& option) {
-                    if (++i >= argc) {
-                        invalid_arg = true;
-                        return;
-                    }
-                    *option.target = argv_to_utf8(i, argv);
-                    found_arg      = true;
-                }))
-                break;
-
-            if (match_and_apply(options.int_options, [&](auto& option) {
-                    if (++i >= argc) {
-                        invalid_arg = true;
-                        return;
-                    }
-                    *option.target = std::stoi(argv[i]);
-                    found_arg      = true;
-                }))
-                break;
-
-            if (match_and_apply(options.float_options, [&](auto& option) {
-                    if (++i >= argc) {
-                        invalid_arg = true;
-                        return;
-                    }
-                    *option.target = std::stof(argv[i]);
-                    found_arg      = true;
-                }))
-                break;
-
-            if (match_and_apply(options.bool_options, [&](auto& option) {
-                    *option.target = option.keep_true ? true : false;
-                    found_arg      = true;
-                }))
-                break;
-
-            if (match_and_apply(options.manual_options, [&](auto& option) {
-                    int ret = option.cb(argc, argv, i);
-                    if (ret < 0) {
-                        invalid_arg = true;
-                        return;
-                    }
-                    i += ret;
-                    found_arg = true;
-                }))
-                break;
-        }
-
-        if (invalid_arg) {
-            LOG_ERROR("error: invalid parameter for argument: %s", arg.c_str());
-            return false;
-        }
-        if (!found_arg) {
-            LOG_ERROR("error: unknown argument: %s", arg.c_str());
-            return false;
-        }
-    }
-
-    return true;
-}
+bool parse_options(int argc, const char** argv, const std::vector<ArgOptions>& options_list);
 
 struct SDContextParams {
     int n_threads = -1;
@@ -1828,128 +1514,19 @@ struct SDGenerationParams {
     }
 };
 
-static std::string version_string() {
-    return std::string("stable-diffusion.cpp version ") + sd_version() + ", commit " + sd_commit();
-}
 
-uint8_t* load_image_common(bool from_memory,
-                           const char* image_path_or_bytes,
-                           int len,
-                           int& width,
-                           int& height,
-                           int expected_width   = 0,
-                           int expected_height  = 0,
-                           int expected_channel = 3) {
-    int c = 0;
-    const char* image_path;
-    uint8_t* image_buffer = nullptr;
-    if (from_memory) {
-        image_path   = "memory";
-        image_buffer = (uint8_t*)stbi_load_from_memory((const stbi_uc*)image_path_or_bytes, len, &width, &height, &c, expected_channel);
-    } else {
-        image_path   = image_path_or_bytes;
-        image_buffer = (uint8_t*)stbi_load(image_path_or_bytes, &width, &height, &c, expected_channel);
-    }
-    if (image_buffer == nullptr) {
-        LOG_ERROR("load image from '%s' failed", image_path);
-        return nullptr;
-    }
-    if (c < expected_channel) {
-        fprintf(stderr,
-                "the number of channels for the input image must be >= %d,"
-                "but got %d channels, image_path = %s",
-                expected_channel,
-                c,
-                image_path);
-        free(image_buffer);
-        return nullptr;
-    }
-    if (width <= 0) {
-        LOG_ERROR("error: the width of image must be greater than 0, image_path = %s", image_path);
-        free(image_buffer);
-        return nullptr;
-    }
-    if (height <= 0) {
-        LOG_ERROR("error: the height of image must be greater than 0, image_path = %s", image_path);
-        free(image_buffer);
-        return nullptr;
-    }
-
-    // Resize input image ...
-    if ((expected_width > 0 && expected_height > 0) && (height != expected_height || width != expected_width)) {
-        float dst_aspect = (float)expected_width / (float)expected_height;
-        float src_aspect = (float)width / (float)height;
-
-        int crop_x = 0, crop_y = 0;
-        int crop_w = width, crop_h = height;
-
-        if (src_aspect > dst_aspect) {
-            crop_w = (int)(height * dst_aspect);
-            crop_x = (width - crop_w) / 2;
-        } else if (src_aspect < dst_aspect) {
-            crop_h = (int)(width / dst_aspect);
-            crop_y = (height - crop_h) / 2;
-        }
-
-        if (crop_x != 0 || crop_y != 0) {
-            LOG_INFO("crop input image from %dx%d to %dx%d, image_path = %s", width, height, crop_w, crop_h, image_path);
-            uint8_t* cropped_image_buffer = (uint8_t*)malloc(crop_w * crop_h * expected_channel);
-            if (cropped_image_buffer == nullptr) {
-                LOG_ERROR("error: allocate memory for crop\n");
-                free(image_buffer);
-                return nullptr;
-            }
-            for (int row = 0; row < crop_h; row++) {
-                uint8_t* src = image_buffer + ((crop_y + row) * width + crop_x) * expected_channel;
-                uint8_t* dst = cropped_image_buffer + (row * crop_w) * expected_channel;
-                memcpy(dst, src, crop_w * expected_channel);
-            }
-
-            width  = crop_w;
-            height = crop_h;
-            free(image_buffer);
-            image_buffer = cropped_image_buffer;
-        }
-
-        LOG_INFO("resize input image from %dx%d to %dx%d", width, height, expected_width, expected_height);
-        int resized_height = expected_height;
-        int resized_width  = expected_width;
-
-        uint8_t* resized_image_buffer = (uint8_t*)malloc(resized_height * resized_width * expected_channel);
-        if (resized_image_buffer == nullptr) {
-            LOG_ERROR("error: allocate memory for resize input image\n");
-            free(image_buffer);
-            return nullptr;
-        }
-        stbir_resize(image_buffer, width, height, 0,
-                     resized_image_buffer, resized_width, resized_height, 0, STBIR_TYPE_UINT8,
-                     expected_channel, STBIR_ALPHA_CHANNEL_NONE, 0,
-                     STBIR_EDGE_CLAMP, STBIR_EDGE_CLAMP,
-                     STBIR_FILTER_BOX, STBIR_FILTER_BOX,
-                     STBIR_COLORSPACE_SRGB, nullptr);
-        width  = resized_width;
-        height = resized_height;
-        free(image_buffer);
-        image_buffer = resized_image_buffer;
-    }
-    return image_buffer;
-}
 
 uint8_t* load_image_from_file(const char* image_path,
                               int& width,
                               int& height,
-                              int expected_width   = 0,
-                              int expected_height  = 0,
-                              int expected_channel = 3) {
-    return load_image_common(false, image_path, 0, width, height, expected_width, expected_height, expected_channel);
-}
+                              int expected_width = 0,
+                              int expected_height = 0,
+                              int expected_channel = 3);
 
 uint8_t* load_image_from_memory(const char* image_bytes,
                                 int len,
                                 int& width,
                                 int& height,
-                                int expected_width   = 0,
-                                int expected_height  = 0,
-                                int expected_channel = 3) {
-    return load_image_common(true, image_bytes, len, width, height, expected_width, expected_height, expected_channel);
-}
+                                int expected_width = 0,
+                                int expected_height = 0,
+                                int expected_channel = 3);

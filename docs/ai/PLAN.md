@@ -76,17 +76,26 @@
     *   Frontend: Added "Apply Forge Parameters" magic button to instantly populate settings from pasted metadata.
     *   Frontend: Integrated "Forge Format" display and copy-to-clipboard functionality in the gallery and result views.
 
-### Next Milestones
-    
-    1.  **Upscale / Hires. Fix (Native ESRGAN):**
-        *   [ ] Backend: Full integration of ESRGAN upscaler models via the dynamic model loading system.
-        *   [ ] Frontend: Dedicated "Upscale" button and workflow.
-    
-    2.  **Prompt Engineering (In-Browser LLM):**
-        *   [ ] Integration of `transformers.js` for local prompt rewriting and enhancement.
-        *   [ ] Intelligent "Variations" using small models like Qwen2.5-Instruct or Gemma 3.
-    
-    3.  **Advanced Model Management:**
-        *   [ ] Support for LoRA management and triggering via the UI.
-        *   [ ] Model downloader/manager interface.
+### Roadmap
+
+#### Phase 1: Architecture & Technical Debt (Current Focus)
+1.  **Server Refactoring (Crucial):**
+    *   [ ] Split `examples/server/main.cpp` (1600+ lines) into modular components (`server_state`, `model_loader`, `api_endpoints`).
+    *   [ ] Create dedicated headers/sources for API utilities and helpers.
+    *   See `docs/ai/REFACTORING_PLAN.md` for details.
+
+#### Phase 2: Upscaling & High-Res Fix
+1.  **Upscale / Hires. Fix (Native ESRGAN):**
+    *   [ ] Backend: Full integration of ESRGAN upscaler models via the dynamic model loading system.
+    *   [ ] Frontend: Dedicated "Upscale" button and workflow.
+    *   See `docs/ai/UPSCALING_PLAN.md` and `docs/ai/UPSCALING_IMPLEMENTATION.md`.
+
+#### Phase 3: Advanced Features
+1.  **Prompt Engineering (In-Browser LLM):**
+    *   [ ] Integration of `transformers.js` for local prompt rewriting and enhancement.
+    *   [ ] Intelligent "Variations" using small models like Qwen2.5-Instruct or Gemma 3.
+
+2.  **Advanced Model Management:**
+    *   [ ] Support for LoRA management and triggering via the UI.
+    *   [ ] Model downloader/manager interface.
     

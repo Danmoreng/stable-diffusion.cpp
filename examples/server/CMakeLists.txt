@@ -1,6 +1,13 @@
 set(TARGET sd-server)
 
-add_executable(${TARGET} main.cpp)
+add_executable(${TARGET} 
+    main.cpp 
+    ../common/common.cpp 
+    api_utils.cpp 
+    server_state.cpp 
+    model_loader.cpp 
+    api_endpoints.cpp
+)
 
 # Define the path to the web UI's output directory (relative to this CMakeLists.txt)
 set(WEBUI_PUBLIC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/public")
