@@ -169,21 +169,51 @@ struct UpscalerGGML {
             }
 
             // 4. Prepare DiT Inputs
-            // t = noise level (0 for upscale usually, or small noise)
-            // context = text embeddings (need to load pos/neg embeddings)
-            // For now, using placeholders or relying on hardcoded embeddings if loaded in model
+            // latents from VAE encode: [W/8, H/8, 16, 1]
+            int lw = latents->ne[0];
+            int lh = latents->ne[1];
             
-            // Create dummy timestep and context for now to test flow
-            ggml_tensor* t = ggml_new_tensor_1d(work_ctx, GGML_TYPE_F32, 1);
-            ggml_set_f32(t, 0.0f); // 0 noise?
+            // Create x_t (noisy latents): [W/8, H/8, 16, 1]
+            // For a single pass, we can use zeros or random noise. 
+            // In SR models, it's often initialized with the blurred latent.
+            ggml_tensor* x_t = ggml_new_tensor_4d(work_ctx, GGML_TYPE_F32, lw, lh, 16, 1);
+            memcpy(x_t->data, latents->data, ggml_nbytes(latents)); 
 
-            // Context needs to be [N, L, D]
-            ggml_tensor* context = ggml_new_tensor_3d(work_ctx, GGML_TYPE_F32, 4096, 77, 1); // Example dim
+            // Create dit_input: [W/8, H/8, 33, 1]
+            // Channels: [0:16] = x_t, [16:32] = latents_cond, [32] = mask
+            ggml_tensor* dit_input = ggml_new_tensor_4d(work_ctx, GGML_TYPE_F32, lw, lh, 33, 1);
+            
+            // Let's use a cleaner manual copy loop
+            {
+                float* dst = (float*)dit_input->data;
+                float* src_xt = (float*)x_t->data;
+                float* src_lc = (float*)latents->data;
+                int n_pix = lw * lh;
+                
+                for (int c = 0; c < 16; c++) {
+                    memcpy(dst + c * n_pix, src_xt + c * n_pix, n_pix * sizeof(float));
+                }
+                for (int c = 0; c < 16; c++) {
+                    memcpy(dst + (16 + c) * n_pix, src_lc + c * n_pix, n_pix * sizeof(float));
+                }
+                // Mask channel
+                for (int i = 0; i < n_pix; i++) {
+                    dst[32 * n_pix + i] = 1.0f;
+                }
+            }
+
+            // t = noise level (0 for upscale usually, or small noise)
+            ggml_tensor* t = ggml_new_tensor_1d(work_ctx, GGML_TYPE_F32, 1);
+            ggml_set_f32(t, 0.0f); 
+
+            // Context needs to be [in_dim, seq_len]
+            // For SeedVR2 3B, txt_in_dim = 5120
+            ggml_tensor* context = ggml_new_tensor_2d(work_ctx, GGML_TYPE_F32, 5120, 77); 
             ggml_set_f32(context, 0.0f); // Empty context
 
             // 5. DiT Upscale
             ggml_tensor* upscaled_latents = nullptr;
-            if (!seedvr2_dit->compute(n_threads, latents, t, context, &upscaled_latents, work_ctx)) {
+            if (!seedvr2_dit->compute(n_threads, dit_input, t, context, &upscaled_latents, work_ctx)) {
                 LOG_ERROR("SeedVR2 DiT upscale failed");
                 ggml_free(work_ctx);
                 return {0, 0, 0, nullptr};
