@@ -1,16 +1,23 @@
 #include "esrgan.hpp"
 #include "ggml_extend.hpp"
 #include "model.h"
+#include "seedvr2.hpp"
 #include "stable-diffusion.h"
+
+#define STB_IMAGE_RESIZE_IMPLEMENTATION
+#include "stb_image_resize.h"
 
 struct UpscalerGGML {
     ggml_backend_t backend    = nullptr;  // general backend
     ggml_type model_data_type = GGML_TYPE_F16;
     std::shared_ptr<ESRGAN> esrgan_upscaler;
+    std::shared_ptr<SeedVR2::SeedVR2DiTRunner> seedvr2_dit;
+    std::shared_ptr<SeedVR2::SeedVR2VAERunner> seedvr2_vae;
     std::string esrgan_path;
     int n_threads;
     bool direct   = false;
     int tile_size = 128;
+    bool is_seedvr2 = false;
 
     UpscalerGGML(int n_threads,
                  bool direct   = false,
@@ -44,15 +51,60 @@ struct UpscalerGGML {
         LOG_DEBUG("Using SYCL backend");
         backend = ggml_backend_sycl_init(0);
 #endif
+        if (!backend) {
+            LOG_DEBUG("Using CPU backend");
+            backend = ggml_backend_cpu_init();
+        }
+
+        // Check for SeedVR2
+        if (esrgan_path.find("seedvr") != std::string::npos) {
+            is_seedvr2 = true;
+            LOG_INFO("Detected SeedVR2 model from path: %s", esrgan_path.c_str());
+            
+            // Assume VAE is in same dir or passed (TODO: handle VAE path properly)
+            // For now, load DiT. 
+            // We need a way to specify VAE path. Maybe derive from esrgan_path?
+            // E.g. if path is "seedvr2_dit.safetensors", look for "seedvr2_vae.safetensors"
+            
+            ModelLoader model_loader;
+            if (!model_loader.init_from_file_and_convert_name(esrgan_path)) {
+                LOG_ERROR("init model loader from file failed: '%s'", esrgan_path.c_str());
+                return false;
+            }
+            model_loader.set_wtype_override(model_data_type);
+            
+            seedvr2_dit = std::make_shared<SeedVR2::SeedVR2DiTRunner>(backend, offload_params_to_cpu, model_loader.get_tensor_storage_map());
+            if (!seedvr2_dit->load_from_file(esrgan_path)) { // GGMLRunner load_from_file
+                 LOG_ERROR("Failed to load SeedVR2 DiT");
+                 return false;
+            }
+            
+            // Try to find VAE
+            std::string vae_path = "models/seedvr/ema_vae_fp16.safetensors"; // Default fallback
+            // TODO: Better path resolution
+            
+            ModelLoader vae_loader;
+            if (vae_loader.init_from_file_and_convert_name(vae_path)) {
+                vae_loader.set_wtype_override(model_data_type);
+                seedvr2_vae = std::make_shared<SeedVR2::SeedVR2VAERunner>(backend, offload_params_to_cpu, vae_loader.get_tensor_storage_map());
+                if (!seedvr2_vae->load_from_file(vae_path)) {
+                    LOG_ERROR("Failed to load SeedVR2 VAE from %s", vae_path.c_str());
+                    return false;
+                }
+            } else {
+                LOG_ERROR("Could not find SeedVR2 VAE at default location: %s", vae_path.c_str());
+                return false;
+            }
+            
+            return true;
+        }
+
+        // Default ESRGAN
         ModelLoader model_loader;
         if (!model_loader.init_from_file_and_convert_name(esrgan_path)) {
             LOG_ERROR("init model loader from file failed: '%s'", esrgan_path.c_str());
         }
         model_loader.set_wtype_override(model_data_type);
-        if (!backend) {
-            LOG_DEBUG("Using CPU backend");
-            backend = ggml_backend_cpu_init();
-        }
         LOG_INFO("Upscaler weight type: %s", ggml_type_name(model_data_type));
         esrgan_upscaler = std::make_shared<ESRGAN>(backend, offload_params_to_cpu, tile_size, model_loader.get_tensor_storage_map());
         if (direct) {
@@ -65,6 +117,111 @@ struct UpscalerGGML {
     }
 
     sd_image_t upscale(sd_image_t input_image, uint32_t upscale_factor) {
+        if (is_seedvr2) {
+            // SeedVR2 Upscaling Logic
+            int target_width = input_image.width * upscale_factor;
+            int target_height = input_image.height * upscale_factor;
+            
+            // Ensure dimensions are divisible by 16 (VAE requirement)
+            target_width = (target_width / 16) * 16;
+            target_height = (target_height / 16) * 16;
+
+            LOG_INFO("SeedVR2 upscaling to %dx%d", target_width, target_height);
+
+            // 1. Resize Image
+            std::vector<uint8_t> resized_data(target_width * target_height * 3);
+            stbir_resize_uint8(input_image.data, input_image.width, input_image.height, 0,
+                               resized_data.data(), target_width, target_height, 0, 3);
+
+            struct ggml_init_params params;
+            params.mem_size   = static_cast<size_t>(2048 * 1024) * 1024; // 2GB buffer
+            params.mem_buffer = nullptr;
+            params.no_alloc   = false;
+            struct ggml_context* work_ctx = ggml_init(params);
+
+            // 2. Image to Tensor (Normalize -1 to 1)
+            ggml_tensor* x = ggml_new_tensor_4d(work_ctx, GGML_TYPE_F32, target_width, target_height, 3, 1);
+            sd_image_t resized_img = { (uint32_t)target_width, (uint32_t)target_height, 3, resized_data.data() };
+            sd_image_to_ggml_tensor(resized_img, x);
+            
+            {
+                float* x_ptr = (float*)x->data;
+                for (int i = 0; i < ggml_nelements(x); i++) {
+                    x_ptr[i] = x_ptr[i] * 2.0f - 1.0f;
+                }
+            }
+
+            // 3. VAE Encode
+            ggml_tensor* latents = nullptr;
+            if (!seedvr2_vae->compute(n_threads, x, false, &latents, work_ctx)) { // false = encode
+                LOG_ERROR("SeedVR2 VAE encode failed");
+                ggml_free(work_ctx);
+                return {0, 0, 0, nullptr};
+            }
+
+            if (getenv("SD_DUMP_TENSORS")) {
+                FILE* f = fopen("cpp_latents.bin", "wb");
+                if (f) {
+                    fwrite(latents->data, 1, ggml_nbytes(latents), f);
+                    fclose(f);
+                    LOG_INFO("Dumped cpp_latents.bin");
+                }
+            }
+
+            // 4. Prepare DiT Inputs
+            // t = noise level (0 for upscale usually, or small noise)
+            // context = text embeddings (need to load pos/neg embeddings)
+            // For now, using placeholders or relying on hardcoded embeddings if loaded in model
+            
+            // Create dummy timestep and context for now to test flow
+            ggml_tensor* t = ggml_new_tensor_1d(work_ctx, GGML_TYPE_F32, 1);
+            ggml_set_f32(t, 0.0f); // 0 noise?
+
+            // Context needs to be [N, L, D]
+            ggml_tensor* context = ggml_new_tensor_3d(work_ctx, GGML_TYPE_F32, 4096, 77, 1); // Example dim
+            ggml_set_f32(context, 0.0f); // Empty context
+
+            // 5. DiT Upscale
+            ggml_tensor* upscaled_latents = nullptr;
+            if (!seedvr2_dit->compute(n_threads, latents, t, context, &upscaled_latents, work_ctx)) {
+                LOG_ERROR("SeedVR2 DiT upscale failed");
+                ggml_free(work_ctx);
+                return {0, 0, 0, nullptr};
+            }
+
+            if (getenv("SD_DUMP_TENSORS")) {
+                FILE* f = fopen("cpp_upscaled_latents.bin", "wb");
+                if (f) {
+                    fwrite(upscaled_latents->data, 1, ggml_nbytes(upscaled_latents), f);
+                    fclose(f);
+                    LOG_INFO("Dumped cpp_upscaled_latents.bin");
+                }
+            }
+
+            // 6. VAE Decode
+            ggml_tensor* decoded = nullptr;
+            if (!seedvr2_vae->compute(n_threads, upscaled_latents, true, &decoded, work_ctx)) { // true = decode
+                LOG_ERROR("SeedVR2 VAE decode failed");
+                ggml_free(work_ctx);
+                return {0, 0, 0, nullptr};
+            }
+
+            // 7. Tensor to Image (Denormalize -1..1 -> 0..1 -> 0..255)
+            {
+                float* dec_ptr = (float*)decoded->data;
+                for (int i = 0; i < ggml_nelements(decoded); i++) {
+                    dec_ptr[i] = (dec_ptr[i] + 1.0f) * 0.5f;
+                }
+            }
+            ggml_ext_tensor_clamp_inplace(decoded, 0.0f, 1.0f);
+            
+            uint8_t* output_data = ggml_tensor_to_sd_image(decoded);
+            
+            ggml_free(work_ctx);
+
+            return { (uint32_t)target_width, (uint32_t)target_height, 3, output_data };
+        }
+
         // upscale_factor, unused for RealESRGAN_x4plus_anime_6B.pth
         sd_image_t upscaled_image = {0, 0, 0, nullptr};
         int output_width          = (int)input_image.width * esrgan_upscaler->scale;
