@@ -172,26 +172,6 @@ namespace SeedVR2 {
                 auto h = ggml_mul(ctx->ggml_ctx, hid, scale);
                 return ggml_add(ctx->ggml_ctx, h, shift);
             } else if (mode == "out") {
-                // If g=6, gateA is at index 2 (PyTorch code: unbind(-1) but only uses gateA if mode==out)
-                // Actually if l=1, idx=0, emb_view[2, 0, :, :] is used for gateA if mode="out"
-                // Wait, if l=1, then emb is [6*dim]. Rearrange to [6, 1, dim].
-                // If mode="out", it uses idx=0, and unbinds.
-                // In my case if mode="out" and l=1, we still want index 2?
-                // Let's re-check: idx = self.layers.index(layer). if layers=["out"], idx=0.
-                // emb[..., 0, :] -> [b, dim, 6]. unbind(-1) -> shiftA, scaleA, gateA, ...
-                // gateA is the 3rd element? No, unbind(-1) unbinds the LAST dimension.
-                // If emb is [b, dim, 1, 6], unbind(-1) gives 6 tensors of [b, dim, 1].
-                // The PyTorch code says: shiftA, scaleA, gateA = emb.unbind(-1)
-                // This only works if there are 3. If there are 6, it might fail or only take first 3.
-                // Wait, if l=1, then emb is [b, dim, 6]. unbind(-1) gives 6.
-                // But the code says "shiftA, scaleA, gateA = emb.unbind(-1)". 
-                // This Python syntax works if RHS has exactly 3.
-                // If l=1, g=6, it will FAIL in Python if it tries to unpack 6 into 3.
-                // UNLESS layers is always size 2 for blocks? 
-                // In NaDiT v2, blocks use layers=["attn", "mlp"], so l=2, g=3. 
-                // For vid_out_ada, layers=["out"], modes=["in"]. So mode is NEVER "out" there.
-                // So g=3 is always true when mode="out" is possible.
-                
                 struct ggml_tensor* gateB = params[layer + "_gate"];
                 auto gate = ggml_add(ctx->ggml_ctx, gateA, gateB);
                 return ggml_mul(ctx->ggml_ctx, hid, gate);
@@ -201,6 +181,24 @@ namespace SeedVR2 {
     };
 
     // --- DiT Components ---
+
+    class SeedVR2RoPE : public GGMLBlock {
+    protected:
+        void init_params(struct ggml_context* ctx, const String2TensorStorage& tensor_storage_map = {}, const std::string prefix = "") override {
+            // Load rope.rope.freqs
+            // prefix comes as "blocks.X.attn.rope."
+            auto iter = tensor_storage_map.find(prefix + "rope.freqs");
+            if (iter != tensor_storage_map.end()) {
+                 params["rope.freqs"] = ggml_new_tensor(ctx, iter->second.type, iter->second.n_dims, &iter->second.ne[0]);
+            }
+        }
+    public:
+        SeedVR2RoPE() {}
+        struct ggml_tensor* forward(GGMLRunnerContext* ctx, struct ggml_tensor* x) {
+            // Placeholder forward - we don't apply RoPE yet but we load weights
+            return x;
+        }
+    };
 
     class NaMMAttention : public GGMLBlock {
     protected:
@@ -232,6 +230,7 @@ namespace SeedVR2 {
                 blocks["norm_k.vid"]   = std::shared_ptr<GGMLBlock>(new RMSNorm(head_dim, 1e-5f, true));
                 blocks["norm_k.txt"]   = std::shared_ptr<GGMLBlock>(new RMSNorm(head_dim, 1e-5f, true));
             }
+            blocks["rope"] = std::shared_ptr<GGMLBlock>(new SeedVR2RoPE());
         }
 
         std::pair<struct ggml_tensor*, struct ggml_tensor*> forward_dual(GGMLRunnerContext* ctx, struct ggml_tensor* vid, struct ggml_tensor* txt) {
@@ -526,17 +525,32 @@ namespace SeedVR2 {
         }
 
         struct ggml_tensor* forward(GGMLRunnerContext* ctx, struct ggml_tensor* x) {
-            // x: [W, H, T, C]
+            // x: [W, H, T, C] (channels at dim 3)
+            // ggml_group_norm expects channels at dim 2 (standard NCHW where C is dim 2)
+            // So we permute [W, H, T, C] -> [W, H, C, T] to put C at dim 2.
+            
+            x = ggml_permute(ctx->ggml_ctx, x, 0, 1, 3, 2); // [W, H, C, T]
+            x = ggml_cont(ctx->ggml_ctx, x);
+            
             x = ggml_group_norm(ctx->ggml_ctx, x, num_groups, eps);
+            
             if (affine) {
                 struct ggml_tensor* w = params["weight"];
                 struct ggml_tensor* b = params["bias"];
-                // Reshape w, b to [1, 1, 1, num_channels] to match [W, H, T, C]
-                w = ggml_reshape_4d(ctx->ggml_ctx, w, 1, 1, 1, num_channels);
-                b = ggml_reshape_4d(ctx->ggml_ctx, b, 1, 1, 1, num_channels);
+                // w, b are [C].
+                // After permute, x is [W, H, C, T].
+                // We want to broadcast w, b along C (dim 2).
+                // Reshape w, b to [1, 1, C, 1]
+                w = ggml_reshape_4d(ctx->ggml_ctx, w, 1, 1, num_channels, 1);
+                b = ggml_reshape_4d(ctx->ggml_ctx, b, 1, 1, num_channels, 1);
                 x = ggml_mul(ctx->ggml_ctx, x, w);
                 x = ggml_add(ctx->ggml_ctx, x, b);
             }
+            
+            // Permute back: [W, H, C, T] -> [W, H, T, C]
+            x = ggml_permute(ctx->ggml_ctx, x, 0, 1, 3, 2);
+            x = ggml_cont(ctx->ggml_ctx, x);
+            
             return x;
         }
     };
@@ -680,7 +694,7 @@ namespace SeedVR2 {
                 blocks["encoder.mid_block.resnets.0"] = std::shared_ptr<GGMLBlock>(new VAEResnetBlock(512, 512, false));
                 blocks["encoder.mid_block.attentions.0"] = std::shared_ptr<GGMLBlock>(new VAEAttnBlock(512));
                 blocks["encoder.mid_block.resnets.1"] = std::shared_ptr<GGMLBlock>(new VAEResnetBlock(512, 512, false));
-                blocks["encoder.conv_norm_out"] = std::shared_ptr<GGMLBlock>(new GroupNorm(32, 512, 1e-6f, true));
+                blocks["encoder.conv_norm_out"] = std::shared_ptr<GGMLBlock>(new SeedVR2GroupNorm(32, 512, 1e-6f, true));
                 blocks["encoder.conv_out"] = std::shared_ptr<GGMLBlock>(new Conv3d(512, 32, {3, 3, 3}, {1, 1, 1}, {1, 1, 1}));
             }
 
@@ -700,7 +714,7 @@ namespace SeedVR2 {
                     blocks["decoder.up_blocks." + std::to_string(i) + ".upsamplers.0"] = std::shared_ptr<GGMLBlock>(new VAEUpsample3D(out_c, temporal_up));
                 }
             }
-            blocks["decoder.conv_norm_out"] = std::shared_ptr<GGMLBlock>(new GroupNorm(32, 128, 1e-6f, true));
+            blocks["decoder.conv_norm_out"] = std::shared_ptr<GGMLBlock>(new SeedVR2GroupNorm(32, 128, 1e-6f, true));
             blocks["decoder.conv_out"] = std::shared_ptr<GGMLBlock>(new Conv3d(128, 3, {3, 3, 3}, {1, 1, 1}, {1, 1, 1}));
         }
 
@@ -727,7 +741,7 @@ namespace SeedVR2 {
             x = std::dynamic_pointer_cast<VAEResnetBlock>(blocks["encoder.mid_block.resnets.1"])->forward(ctx, x);
             
             LOG_INFO("VAE encode: out");
-            x = std::dynamic_pointer_cast<GroupNorm>(blocks["encoder.conv_norm_out"])->forward(ctx, x);
+            x = std::dynamic_pointer_cast<SeedVR2GroupNorm>(blocks["encoder.conv_norm_out"])->forward(ctx, x);
             x = ggml_silu(ctx->ggml_ctx, x);
             x = std::dynamic_pointer_cast<Conv3d>(blocks["encoder.conv_out"])->forward(ctx, x);
             
@@ -750,7 +764,7 @@ namespace SeedVR2 {
                     h = std::dynamic_pointer_cast<VAEUpsample3D>(blocks["decoder.up_blocks." + std::to_string(i) + ".upsamplers.0"])->forward(ctx, h);
                 }
             }
-            h = std::dynamic_pointer_cast<GroupNorm>(blocks["decoder.conv_norm_out"])->forward(ctx, h);
+            h = std::dynamic_pointer_cast<SeedVR2GroupNorm>(blocks["decoder.conv_norm_out"])->forward(ctx, h);
             h = ggml_silu(ctx->ggml_ctx, h);
             h = std::dynamic_pointer_cast<Conv3d>(blocks["decoder.conv_out"])->forward(ctx, h);
             return h;
@@ -802,7 +816,7 @@ namespace SeedVR2 {
         bool compute(int n_threads, struct ggml_tensor* x, struct ggml_tensor* t, struct ggml_tensor* context, struct ggml_tensor** output, struct ggml_context* output_ctx = nullptr) {
              LOG_INFO("SeedVR2DiT compute start");
              auto get_graph = [&]() -> struct ggml_cgraph* { return build_graph(x, t, context); };
-            bool res = GGMLRunner::compute(get_graph, n_threads, false, output, nullptr);
+            bool res = GGMLRunner::compute(get_graph, n_threads, true, output, nullptr);
              LOG_INFO("SeedVR2DiT compute end: %s", res ? "success" : "failed");
              return res;
         }
@@ -836,7 +850,7 @@ namespace SeedVR2 {
                 ggml_build_forward_expand(gf, out);
                 return gf;
             };
-                         bool res = GGMLRunner::compute(get_graph, n_threads, false, output, nullptr);
+             bool res = GGMLRunner::compute(get_graph, n_threads, true, output, output_ctx);
             
             LOG_INFO("SeedVR2VAE compute end: %s", res ? "success" : "failed");
             return res;

@@ -374,6 +374,7 @@ SD_API sd_image_t* generate_video(sd_ctx_t* sd_ctx, const sd_vid_gen_params_t* s
 typedef struct upscaler_ctx_t upscaler_ctx_t;
 
 SD_API upscaler_ctx_t* new_upscaler_ctx(const char* esrgan_path,
+                                        const char* vae_path,
                                         bool offload_params_to_cpu,
                                         bool direct,
                                         int n_threads,

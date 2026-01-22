@@ -776,6 +776,7 @@ int main(int argc, const char* argv[]) {
     int upscale_factor = 4;  // unused for RealESRGAN_x4plus_anime_6B.pth
     if (ctx_params.esrgan_path.size() > 0 && gen_params.upscale_repeats > 0) {
         upscaler_ctx_t* upscaler_ctx = new_upscaler_ctx(ctx_params.esrgan_path.c_str(),
+                                                        ctx_params.vae_path.c_str(),
                                                         ctx_params.offload_params_to_cpu,
                                                         ctx_params.diffusion_conv_direct,
                                                         ctx_params.n_threads,

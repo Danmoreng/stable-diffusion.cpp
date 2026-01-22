@@ -28,6 +28,7 @@ struct UpscalerGGML {
     }
 
     bool load_from_file(const std::string& esrgan_path,
+                        const std::string& vae_path,
                         bool offload_params_to_cpu,
                         int n_threads) {
         ggml_log_set(ggml_log_callback_default, nullptr);
@@ -80,19 +81,22 @@ struct UpscalerGGML {
             }
             
             // Try to find VAE
-            std::string vae_path = "models/seedvr/ema_vae_fp16.safetensors"; // Default fallback
+            std::string final_vae_path = vae_path;
+            if (final_vae_path.empty()) {
+                final_vae_path = "models/seedvr/ema_vae_fp16.safetensors"; // Default fallback
+            }
             // TODO: Better path resolution
             
             ModelLoader vae_loader;
-            if (vae_loader.init_from_file_and_convert_name(vae_path)) {
+            if (vae_loader.init_from_file_and_convert_name(final_vae_path)) {
                 vae_loader.set_wtype_override(model_data_type);
                 seedvr2_vae = std::make_shared<SeedVR2::SeedVR2VAERunner>(backend, offload_params_to_cpu, vae_loader.get_tensor_storage_map());
-                if (!seedvr2_vae->load_from_file(vae_path)) {
-                    LOG_ERROR("Failed to load SeedVR2 VAE from %s", vae_path.c_str());
+                if (!seedvr2_vae->load_from_file(final_vae_path)) {
+                    LOG_ERROR("Failed to load SeedVR2 VAE from %s", final_vae_path.c_str());
                     return false;
                 }
             } else {
-                LOG_ERROR("Could not find SeedVR2 VAE at default location: %s", vae_path.c_str());
+                LOG_ERROR("Could not find SeedVR2 VAE at default location: %s", final_vae_path.c_str());
                 return false;
             }
             
@@ -173,34 +177,100 @@ struct UpscalerGGML {
             int lw = latents->ne[0];
             int lh = latents->ne[1];
             
-            // Create x_t (noisy latents): [W/8, H/8, 16, 1]
-            // For a single pass, we can use zeros or random noise. 
-            // In SR models, it's often initialized with the blurred latent.
-            ggml_tensor* x_t = ggml_new_tensor_4d(work_ctx, GGML_TYPE_F32, lw, lh, 16, 1);
-            memcpy(x_t->data, latents->data, ggml_nbytes(latents)); 
+            // Fetch latents from backend to host
+            std::vector<float> latents_host(ggml_nelements(latents));
+            ggml_backend_tensor_get(latents, latents_host.data(), 0, ggml_nbytes(latents));
 
-            // Create dit_input: [W/8, H/8, 33, 1]
-            // Channels: [0:16] = x_t, [16:32] = latents_cond, [32] = mask
-            ggml_tensor* dit_input = ggml_new_tensor_4d(work_ctx, GGML_TYPE_F32, lw, lh, 33, 1);
+            // Create x_t (noisy latents) on host for reference/noise addition
+            // For SR, x_t is initialized with the latents (or noise+latents). 
+            // Here we just copy latents as per previous logic (zero noise assumption for now or simple copy)
+            std::vector<float> x_t_host = latents_host; 
+
+            // Patchify parameters
+            int patch_size = 2;
+            int C_in = 33; // 16 (noisy) + 16 (cond) + 1 (mask)
+            int n_tokens_w = lw / patch_size;
+            int n_tokens_h = lh / patch_size;
+            int n_tokens = n_tokens_w * n_tokens_h;
+            int input_dim = C_in * patch_size * patch_size; // 33 * 4 = 132
+
+            // Create dit_input: [132, N_tokens, 1, 1]
+            // GGML shape is [ne0, ne1, ne2, ne3] -> [132, n_tokens, 1, 1]
+            ggml_tensor* dit_input = ggml_new_tensor_2d(work_ctx, GGML_TYPE_F32, input_dim, n_tokens);
             
-            // Let's use a cleaner manual copy loop
-            {
-                float* dst = (float*)dit_input->data;
-                float* src_xt = (float*)x_t->data;
-                float* src_lc = (float*)latents->data;
-                int n_pix = lw * lh;
-                
-                for (int c = 0; c < 16; c++) {
-                    memcpy(dst + c * n_pix, src_xt + c * n_pix, n_pix * sizeof(float));
-                }
-                for (int c = 0; c < 16; c++) {
-                    memcpy(dst + (16 + c) * n_pix, src_lc + c * n_pix, n_pix * sizeof(float));
-                }
-                // Mask channel
-                for (int i = 0; i < n_pix; i++) {
-                    dst[32 * n_pix + i] = 1.0f;
+            std::vector<float> dit_input_host(ggml_nelements(dit_input));
+            float* dst = dit_input_host.data();
+
+            // Source pointers
+            const float* src_xt = x_t_host.data();
+            const float* src_lc = latents_host.data(); // latent cond
+
+            // Helper to get pixel value from (x, y, c) in [W, H, C] layout
+            // latents are [W, H, 16]. stride_w = 1, stride_h = W, stride_c = W*H (if planar)
+            // Wait, sd_image_to_ggml_tensor creates standard layout.
+            // But VAE output layout might be different. 
+            // Checked SeedVR2VAE: x = ggml_ext_slice(..., 3, 0, 16).
+            // ggml_ext_slice preserves layout. Conv3d output is [W, H, T, C] (permuted back).
+            // So stride is: C is fastest? No, usually GGML is column major.
+            // ne[0]=W, ne[1]=H, ne[2]=T, ne[3]=C.
+            // Element at (x, y, t, c) is data[x + y*W + t*W*H + c*W*H*T].
+            // Here T=1. So data[x + y*W + c*W*H].
+            
+            int W = lw;
+            int H = lh;
+            int stride_y = W;
+            int stride_c = W * H;
+
+            for (int ty = 0; ty < n_tokens_h; ty++) {
+                for (int tx = 0; tx < n_tokens_w; tx++) {
+                    int token_idx = ty * n_tokens_w + tx;
+                    float* token_dst = dst + token_idx * input_dim;
+                    
+                    // We fill 132 elements for this token.
+                    // Order: c varies slowest, py, px fastest? 
+                    // Verify: rearrange(x, 'b c (h p1) (w p2) -> b (h w) (c p1 p2)')
+                    // Inner dim is (c p1 p2). c is outer of that block.
+                    // So loop c, then py, then px.
+                    
+                    int dst_idx = 0;
+
+                    // 1. x_t (16 channels)
+                    for (int c = 0; c < 16; c++) {
+                        for (int py = 0; py < patch_size; py++) {
+                            for (int px = 0; px < patch_size; px++) {
+                                int sx = tx * patch_size + px;
+                                int sy = ty * patch_size + py;
+                                int src_idx = sx + sy * stride_y + c * stride_c;
+                                token_dst[dst_idx++] = src_xt[src_idx];
+                            }
+                        }
+                    }
+
+                    // 2. latents_cond (16 channels)
+                    for (int c = 0; c < 16; c++) {
+                        for (int py = 0; py < patch_size; py++) {
+                            for (int px = 0; px < patch_size; px++) {
+                                int sx = tx * patch_size + px;
+                                int sy = ty * patch_size + py;
+                                int src_idx = sx + sy * stride_y + c * stride_c;
+                                token_dst[dst_idx++] = src_lc[src_idx];
+                            }
+                        }
+                    }
+
+                    // 3. mask (1 channel)
+                    for (int py = 0; py < patch_size; py++) {
+                        for (int px = 0; px < patch_size; px++) {
+                            // Mask is all 1.0 for standard upscale?
+                            // Or is it a specific mask? Using 1.0f based on previous code.
+                            token_dst[dst_idx++] = 1.0f;
+                        }
+                    }
                 }
             }
+            
+            // Copy patchified data to device
+            memcpy(dit_input->data, dit_input_host.data(), ggml_nbytes(dit_input));
 
             // t = noise level (0 for upscale usually, or small noise)
             ggml_tensor* t = ggml_new_tensor_1d(work_ctx, GGML_TYPE_F32, 1);
@@ -301,6 +371,7 @@ struct upscaler_ctx_t {
 };
 
 upscaler_ctx_t* new_upscaler_ctx(const char* esrgan_path_c_str,
+                                 const char* vae_path_c_str,
                                  bool offload_params_to_cpu,
                                  bool direct,
                                  int n_threads,
@@ -310,13 +381,14 @@ upscaler_ctx_t* new_upscaler_ctx(const char* esrgan_path_c_str,
         return nullptr;
     }
     std::string esrgan_path(esrgan_path_c_str);
+    std::string vae_path = vae_path_c_str ? std::string(vae_path_c_str) : "";
 
     upscaler_ctx->upscaler = new UpscalerGGML(n_threads, direct, tile_size);
     if (upscaler_ctx->upscaler == nullptr) {
         return nullptr;
     }
 
-    if (!upscaler_ctx->upscaler->load_from_file(esrgan_path, offload_params_to_cpu, n_threads)) {
+    if (!upscaler_ctx->upscaler->load_from_file(esrgan_path, vae_path, offload_params_to_cpu, n_threads)) {
         delete upscaler_ctx->upscaler;
         upscaler_ctx->upscaler = nullptr;
         free(upscaler_ctx);
