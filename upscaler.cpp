@@ -270,24 +270,58 @@ struct UpscalerGGML {
             }
             
             // Copy patchified data to device
-            memcpy(dit_input->data, dit_input_host.data(), ggml_nbytes(dit_input));
+            // We explicitly allocate backend buffer for input to avoid GGMLRunner::to_backend issues
+            ggml_backend_buffer_t dit_input_buffer = ggml_backend_alloc_buffer(backend, ggml_nbytes(dit_input));
+            if (dit_input_buffer) {
+                dit_input->buffer = dit_input_buffer;
+                dit_input->data = ggml_backend_buffer_get_base(dit_input_buffer);
+                ggml_backend_tensor_set(dit_input, dit_input_host.data(), 0, ggml_nbytes(dit_input));
+            } else {
+                LOG_ERROR("Failed to allocate backend buffer for dit_input");
+                ggml_free(work_ctx);
+                return {0, 0, 0, nullptr};
+            }
 
             // t = noise level (0 for upscale usually, or small noise)
             ggml_tensor* t = ggml_new_tensor_1d(work_ctx, GGML_TYPE_F32, 1);
             ggml_set_f32(t, 0.0f); 
+            // Also move t to backend
+            ggml_backend_buffer_t t_buffer = ggml_backend_alloc_buffer(backend, ggml_nbytes(t));
+            if (t_buffer) {
+                t->buffer = t_buffer;
+                t->data = ggml_backend_buffer_get_base(t_buffer);
+                float t_val = 0.0f;
+                ggml_backend_tensor_set(t, &t_val, 0, sizeof(float));
+            }
 
             // Context needs to be [in_dim, seq_len]
             // For SeedVR2 3B, txt_in_dim = 5120
             ggml_tensor* context = ggml_new_tensor_2d(work_ctx, GGML_TYPE_F32, 5120, 77); 
             ggml_set_f32(context, 0.0f); // Empty context
+            // Also move context to backend
+            ggml_backend_buffer_t context_buffer = ggml_backend_alloc_buffer(backend, ggml_nbytes(context));
+            if (context_buffer) {
+                context->buffer = context_buffer;
+                context->data = ggml_backend_buffer_get_base(context_buffer);
+                std::vector<float> zeros(ggml_nelements(context), 0.0f);
+                ggml_backend_tensor_set(context, zeros.data(), 0, ggml_nbytes(context));
+            }
 
             // 5. DiT Upscale
             ggml_tensor* upscaled_latents = nullptr;
             if (!seedvr2_dit->compute(n_threads, dit_input, t, context, &upscaled_latents, work_ctx)) {
                 LOG_ERROR("SeedVR2 DiT upscale failed");
+                if (dit_input_buffer) ggml_backend_buffer_free(dit_input_buffer);
+                if (t_buffer) ggml_backend_buffer_free(t_buffer);
+                if (context_buffer) ggml_backend_buffer_free(context_buffer);
                 ggml_free(work_ctx);
                 return {0, 0, 0, nullptr};
             }
+            
+            // Clean up input buffers
+            if (dit_input_buffer) ggml_backend_buffer_free(dit_input_buffer);
+            if (t_buffer) ggml_backend_buffer_free(t_buffer);
+            if (context_buffer) ggml_backend_buffer_free(context_buffer);
 
             if (getenv("SD_DUMP_TENSORS")) {
                 FILE* f = fopen("cpp_upscaled_latents.bin", "wb");
