@@ -235,9 +235,9 @@ struct UpscalerGGML {
                     int dst_idx = 0;
 
                     // 1. x_t (16 channels)
-                    for (int c = 0; c < 16; c++) {
-                        for (int py = 0; py < patch_size; py++) {
-                            for (int px = 0; px < patch_size; px++) {
+                    for (int py = 0; py < patch_size; py++) {
+                        for (int px = 0; px < patch_size; px++) {
+                            for (int c = 0; c < 16; c++) {
                                 int sx = tx * patch_size + px;
                                 int sy = ty * patch_size + py;
                                 int src_idx = sx + sy * stride_y + c * stride_c;
@@ -247,9 +247,9 @@ struct UpscalerGGML {
                     }
 
                     // 2. latents_cond (16 channels)
-                    for (int c = 0; c < 16; c++) {
-                        for (int py = 0; py < patch_size; py++) {
-                            for (int px = 0; px < patch_size; px++) {
+                    for (int py = 0; py < patch_size; py++) {
+                        for (int px = 0; px < patch_size; px++) {
+                            for (int c = 0; c < 16; c++) {
                                 int sx = tx * patch_size + px;
                                 int sy = ty * patch_size + py;
                                 int src_idx = sx + sy * stride_y + c * stride_c;
@@ -261,8 +261,6 @@ struct UpscalerGGML {
                     // 3. mask (1 channel)
                     for (int py = 0; py < patch_size; py++) {
                         for (int px = 0; px < patch_size; px++) {
-                            // Mask is all 1.0 for standard upscale?
-                            // Or is it a specific mask? Using 1.0f based on previous code.
                             token_dst[dst_idx++] = 1.0f;
                         }
                     }
@@ -361,9 +359,11 @@ struct UpscalerGGML {
                         float* token_src = up_src + token_idx * (16 * 2 * 2);
                         
                         int src_idx = 0;
-                        for (int c = 0; c < 16; c++) {
-                            for (int py = 0; py < 2; py++) {
-                                for (int px = 0; px < 2; px++) {
+                        // Data layout is (t h w c), so c varies fastest.
+                        // t=1, h=2, w=2, c=16.
+                        for (int py = 0; py < 2; py++) {
+                            for (int px = 0; px < 2; px++) {
+                                for (int c = 0; c < 16; c++) {
                                     int sx = tx * 2 + px;
                                     int sy = ty * 2 + py;
                                     int dst_idx = sx + sy * stride_y + c * stride_c;
@@ -402,7 +402,7 @@ struct UpscalerGGML {
                 
                 // Reshape in back to [TileW, TileH, 1, 16] for SeedVR2VAE
                 struct ggml_tensor* vae_in = ggml_view_4d(tile_ctx, in, in->ne[0], in->ne[1], 1, 16,
-                                                         in->nb[1], in->nb[2], in->nb[3], 0);
+                                                         in->nb[1], in->nb[2], in->nb[2], 0);
                 
                 struct ggml_tensor* vae_out = nullptr;
                 if (!seedvr2_vae->compute(n_threads, vae_in, true, &vae_out, tile_ctx)) {

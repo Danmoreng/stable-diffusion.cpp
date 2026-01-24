@@ -453,7 +453,7 @@ namespace SeedVR2 {
         }
 
         struct ggml_tensor* forward(GGMLRunnerContext* ctx, struct ggml_tensor* x, struct ggml_tensor* t, struct ggml_tensor* context) {
-            // x: [channels, tokens] -> [33, t*h*w]
+            // x: [channels, tokens] -> [132, t*h*w]
             // t: [1] (timestep scalar)
             // context: [in_dim, seq_len] -> [5120, 77]
             
@@ -471,8 +471,6 @@ namespace SeedVR2 {
             emb = emb_proj_out->forward(ctx, emb);
             
             // 2. Video input projection
-            // Patchify: [33, T, H, W] -> [33*1*2*2, T*H/2*W/2]
-            // For now assume x is already flattened to [132, tokens] or similar
             auto vid_in_proj = std::dynamic_pointer_cast<Linear>(blocks["vid_in.proj"]);
             auto vid = vid_in_proj->forward(ctx, x);
             
@@ -602,7 +600,6 @@ namespace SeedVR2 {
             int kh = std::get<1>(kernel_size);
             int kw = std::get<2>(kernel_size);
             
-            int pd = std::get<0>(padding);
             int ph = std::get<1>(padding);
             int pw = std::get<2>(padding);
             
@@ -614,23 +611,19 @@ namespace SeedVR2 {
             int dh = std::get<1>(dilation);
             int dw = std::get<2>(dilation);
 
-            // Decompose 3D conv into loop of 2D convs to avoid im2col_3d OOM
-            // Out[t] = Sum(k=0..kd-1) Conv2d(x[t_in], w[k])
-            
-            std::vector<struct ggml_tensor*> out_frames;
+            // Decompose 3D conv into loop of 2D convs
             
             // Pre-slice weights [kw, kh, 1, IC*OC]
             std::vector<struct ggml_tensor*> w_slices(kd);
             for (int k = 0; k < kd; k++) {
                 struct ggml_tensor* w_k = ggml_view_4d(ctx->ggml_ctx, w, kw, kh, 1, in_channels * out_channels,
                                                        w->nb[1], w->nb[2], w->nb[3], k * w->nb[2]);
-                w_k = ggml_cont(ctx->ggml_ctx, w_k); // Ensure contiguous for conv2d
+                w_k = ggml_cont(ctx->ggml_ctx, w_k); 
                 w_k = ggml_reshape_4d(ctx->ggml_ctx, w_k, kw, kh, in_channels, out_channels);
                 w_slices[k] = w_k;
             }
 
-            // Pre-slice input frames [W, H, 1, IC] -> [W, H, IC, 1]
-            // We need to reshape input to 2D compatible layout
+            // Pre-slice input frames
             std::vector<struct ggml_tensor*> x_frames(t);
             for (int i = 0; i < t; i++) {
                 struct ggml_tensor* x_i = ggml_view_4d(ctx->ggml_ctx, x, x->ne[0], x->ne[1], 1, x->ne[3],
@@ -640,80 +633,38 @@ namespace SeedVR2 {
                 x_frames[i] = x_i;
             }
 
-            // Calculate output temporal size
-            int64_t t_out = (t + 2 * pd - dd * (kd - 1) - 1) / sd + 1;
+            int64_t t_out = (t - 1) / sd + 1;
+            std::vector<struct ggml_tensor*> out_frames;
             
             for (int i = 0; i < t_out; i++) {
                 struct ggml_tensor* frame_sum = nullptr;
                 
                 for (int k = 0; k < kd; k++) {
-                    int t_in = i * sd - pd + k * dd;
+                    // SeedVR2 Causal Inflation: head is replicated. 
+                    // This means for t_in < 0, we use frame 0.
+                    int t_in = i * sd - (kd - 1) * dd + k * dd;
+                    t_in = std::max(0, std::min((int)t - 1, t_in));
                     
-                    if (t_in >= 0 && t_in < t) {
-                        // Conv2D(x[t_in], w[k])
-                        // Note: padding_h/w handled here
-                        // bias only added once (usually at end, or distributed?)
-                        // Standard: sum(convs) + bias.
-                        // ggml_ext_conv_2d adds bias if provided. 
-                        // We should pass bias=nullptr for accumulation, and add bias at end?
-                        // Or add bias only on first valid k?
-                        // Let's accumulate convs, then add bias manually.
-                        
-                        struct ggml_tensor* conv_res = ggml_ext_conv_2d(ctx->ggml_ctx, x_frames[t_in], w_slices[k], nullptr,
-                                                                        sw, sh, pw, ph, dw, dh, true); // direct=true
-                        
-                        if (frame_sum == nullptr) {
-                            frame_sum = conv_res;
-                        } else {
-                            frame_sum = ggml_add(ctx->ggml_ctx, frame_sum, conv_res);
-                        }
+                    struct ggml_tensor* conv_res = ggml_ext_conv_2d(ctx->ggml_ctx, x_frames[t_in], w_slices[k], nullptr,
+                                                                    sw, sh, pw, ph, dw, dh, false);
+                    
+                    if (frame_sum == nullptr) {
+                        frame_sum = conv_res;
+                    } else {
+                        frame_sum = ggml_add(ctx->ggml_ctx, frame_sum, conv_res);
                     }
                 }
                 
-                if (frame_sum == nullptr) {
-                    // Create zeros [W_out, H_out, OC, 1]
-                    // Dimensions derived from dummy conv
-                    struct ggml_tensor* dummy = ggml_ext_conv_2d(ctx->ggml_ctx, x_frames[0], w_slices[0], nullptr,
-                                                                 sw, sh, pw, ph, dw, dh, true);
-                    frame_sum = ggml_new_tensor(ctx->ggml_ctx, dummy->type, 4, dummy->ne);
-                    
-                    // Zero init using a constant zero tensor if possible, or scale a zeroed tensor?
-                    // ggml_new_tensor data is undefined. 
-                    // Best way in graph: use ggml_dup of a zero tensor? Or ggml_set_f32?
-                    // ggml_set_f32 sets value immediately on CPU but we are building a graph?
-                    // No, ggml_set_f32 is for CPU/immediate.
-                    // To set zero in graph, use ggml_scale(dummy, 0.0) BUT dummy is uninitialized?
-                    // Multiplying garbage by 0.0 is 0.0 (unless NaN/Inf).
-                    // Safe way: use ggml_repeat of a small zero tensor.
-                    // Or reuse existing zero tensor from ctx?
-                    // Let's use the zero_int_tensor cast to float if available, or just scale dummy.
-                    // Actually, let's trust ggml_scale(..., 0.0f) but ensure dummy is valid tensor (it is output of conv).
-                    // Wait, dummy is output of a conv that is NOT part of the sum? 
-                    // We don't want to compute dummy if we don't use it.
-                    // Better: Create a tensor of zeros using ggml_new_tensor and then map it to a zero-setting op?
-                    // GGML doesn't have "fill" op?
-                    // It has ggml_set_zero? No.
-                    // ggml_new_tensor_4d ...
-                    // If we use 'ggml_ext_zeros' from ggml_extend?
-                    frame_sum = ggml_ext_zeros(ctx->ggml_ctx, dummy->ne[0], dummy->ne[1], dummy->ne[2], dummy->ne[3]);
-                }
-                
                 if (b != nullptr) {
-                    // bias is [OC]. frame_sum is [W, H, OC, 1].
-                    // Reshape b to [1, 1, OC, 1] for broadcast add
                     struct ggml_tensor* b_reshaped = ggml_reshape_4d(ctx->ggml_ctx, b, 1, 1, out_channels, 1);
                     frame_sum = ggml_add(ctx->ggml_ctx, frame_sum, b_reshaped);
                 }
                 
-                // frame_sum is [W_out, H_out, OC, 1]
-                // Need to stash for concat.
-                // Output expected: [W_out, H_out, T_out, OC]
-                // Reshape frame_sum to [W_out, H_out, 1, OC]
+                // Reshape frame_sum [W, H, OC, 1] -> [W, H, 1, OC]
                 frame_sum = ggml_reshape_4d(ctx->ggml_ctx, frame_sum, frame_sum->ne[0], frame_sum->ne[1], 1, out_channels);
                 out_frames.push_back(frame_sum);
             }
             
-            // Concat along T (dim 2)
             struct ggml_tensor* result = out_frames[0];
             for (size_t i = 1; i < out_frames.size(); i++) {
                 result = ggml_concat(ctx->ggml_ctx, result, out_frames[i], 2);
@@ -751,8 +702,6 @@ namespace SeedVR2 {
             auto conv1 = std::dynamic_pointer_cast<CausalConv3d>(blocks["conv1"]);
             auto norm2 = std::dynamic_pointer_cast<SeedVR2GroupNorm>(blocks["norm2"]);
             auto conv2 = std::dynamic_pointer_cast<CausalConv3d>(blocks["conv2"]);
-// ... (rest of SeedVR2VAE also updated)
-
             
             struct ggml_tensor* h = x;
             h = norm1->forward(ctx, h);
@@ -830,63 +779,35 @@ namespace SeedVR2 {
             int64_t t_ratio = temporal_up ? 2 : 1;
             int64_t c_out   = c / (s_ratio * s_ratio * t_ratio);
             
-            int64_t X = s_ratio; // Height factor
-            int64_t Y = s_ratio; // Width factor
-            int64_t Z = t_ratio; // Temporal factor
-            int64_t XY = X * Y;
-
-            // Pre-Step: Move XY out of C and merge with W*H
-            // C = XY * Z * C_out. 
-            // We want [W*H*XY, T, Z*C_out]
-            x = ggml_reshape_4d(ctx->ggml_ctx, x, w*h, t, XY, Z*c_out);
-            x = ggml_permute(ctx->ggml_ctx, x, 0, 2, 1, 3); // [W*H, XY, T, Z*C_out]
-            x = ggml_cont(ctx->ggml_ctx, x);
-            x = ggml_reshape_4d(ctx->ggml_ctx, x, w*h*XY, t, Z*c_out, 1);
-
-            // Step 1: Temporal (Z -> T)
-            if (Z == 2) {
-                // Input [W*H*XY, T, Z*C_out, 1]
-                // Need [W*H*XY, 2T, C_out, 1]
-                x = ggml_reshape_4d(ctx->ggml_ctx, x, w*h*XY, t, Z, c_out);
-                x = ggml_permute(ctx->ggml_ctx, x, 0, 2, 1, 3); // [W*H*XY, Z, T, C_out]
+            // SeedVR2 layout: (x y z c). c is LSB (fastest), then z, then y, then x is MSB.
+            // Factors: C_out, Z, Y, X.
+            
+            // Step 1: Temporal (Z)
+            if (temporal_up) {
+                // Split C into [C_out*4, Z]
+                x = ggml_reshape_4d(ctx->ggml_ctx, x, w*h*t, c_out, 4, 2); 
+                x = ggml_permute(ctx->ggml_ctx, x, 0, 3, 1, 2); // [WHT, Z, C_out, YX]
                 x = ggml_cont(ctx->ggml_ctx, x);
-                x = ggml_reshape_4d(ctx->ggml_ctx, x, w*h*XY, Z*t, c_out, 1);
+                x = ggml_reshape_4d(ctx->ggml_ctx, x, w*h, 2*t, c_out, 4);
                 t *= 2;
             } else {
-                x = ggml_reshape_4d(ctx->ggml_ctx, x, w*h*XY, t, c_out, 1);
+                x = ggml_reshape_4d(ctx->ggml_ctx, x, w*h, t, c_out, 4);
             }
 
-            // Step 2: Width (Y -> W)
-            // Input [W*H*XY, T, C_out, 1]
-            // Unpack W*H*XY -> [W, H, Y, X]. Note Y is slower than X in XY packing?
-            // XY comes from C. C layout: (X Y Z C_out).
-            // So X is slow, Y is fast.
-            // XY block in memory: Y changes fastest? No, C layout is X,Y,Z,C.
-            // Flattened l = x*(Y*Z*C) + y*(Z*C) ...
-            // So X is MSB, Y is next.
-            // So in XY block, Y is LSB (fast), X is MSB (slow).
-            // So XY memory order: X0Y0, X0Y1, X1Y0, X1Y1.
-            // So Y varies fastest.
-            // So ne[0]=Y, ne[1]=X in a [Y, X] reshape of XY?
-            // Standard reshape fills ne0 first.
-            // So [Y, X] fills Y first.
-            // Correct.
-            
-            // We unpack W*H*XY.
-            // W is fastest. H is next. XY is next (slowest).
-            // So [W, H, Y, X].
-            x = ggml_reshape_4d(ctx->ggml_ctx, x, w, h, Y, X * t * c_out);
-            x = ggml_permute(ctx->ggml_ctx, x, 2, 0, 1, 3); // [Y, W, H, ...]
+            // Step 2: Spatial Width (Y)
+            // Current x is [WH, T, C_out, YX]
+            // We want to move Y next to W.
+            x = ggml_reshape_4d(ctx->ggml_ctx, x, w, h*t*c_out, 2, 2); // Split YX into Y, X
+            x = ggml_permute(ctx->ggml_ctx, x, 2, 0, 1, 3); // [Y, W, HTC, X]
             x = ggml_cont(ctx->ggml_ctx, x);
-            x = ggml_reshape_4d(ctx->ggml_ctx, x, Y*w, h, X * t * c_out, 1);
+            x = ggml_reshape_4d(ctx->ggml_ctx, x, 2*w, h, t*c_out, 2); // combine Y,W -> 2W. ne[3] is X.
             w *= 2;
 
-            // Step 3: Height (X -> H)
-            // Input [W, H, X, T*C_out]
-            x = ggml_reshape_4d(ctx->ggml_ctx, x, w, h, X, t * c_out);
-            x = ggml_permute(ctx->ggml_ctx, x, 0, 2, 1, 3); // [W, X, H, ...]
+            // Step 3: Spatial Height (X)
+            // x is [2W, H, TC_out, X]
+            x = ggml_permute(ctx->ggml_ctx, x, 0, 3, 1, 2); // [2W, X, H, TC_out]
             x = ggml_cont(ctx->ggml_ctx, x);
-            x = ggml_reshape_4d(ctx->ggml_ctx, x, w, X*h, t, c_out);
+            x = ggml_reshape_4d(ctx->ggml_ctx, x, w, 2*h, t, c_out); // [2W, 2H, T, C_out]
             h *= 2;
 
             return std::dynamic_pointer_cast<CausalConv3d>(blocks["conv"])->forward(ctx, x);
