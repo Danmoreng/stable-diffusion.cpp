@@ -530,7 +530,19 @@ namespace SeedVR2 {
             x = ggml_permute(ctx->ggml_ctx, x, 0, 1, 3, 2); // [W, H, C, T]
             x = ggml_cont(ctx->ggml_ctx, x);
             
+            // Fix: Reshape to include T in spatial dimensions for volumetric norm
+            // ggml_group_norm normalizes over ne[0] and ne[1] for each group.
+            // We want normalization over (W, H, T).
+            // Current shape [W, H, C, T]. ne[0]=W, ne[1]=H, ne[2]=C, ne[3]=T.
+            // Reshape to [W, H*T, C, 1].
+            int64_t W = x->ne[0];
+            int64_t H = x->ne[1];
+            int64_t C = x->ne[2];
+            int64_t T = x->ne[3];
+            
+            x = ggml_reshape_4d(ctx->ggml_ctx, x, W, H * T, C, 1);
             x = ggml_group_norm(ctx->ggml_ctx, x, num_groups, eps);
+            x = ggml_reshape_4d(ctx->ggml_ctx, x, W, H, C, T);
             
             if (affine) {
                 struct ggml_tensor* w = params["weight"];

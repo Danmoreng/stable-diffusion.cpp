@@ -132,10 +132,16 @@ struct UpscalerGGML {
 
             LOG_INFO("SeedVR2 upscaling to %dx%d", target_width, target_height);
 
-            // 1. Resize Image
-            std::vector<uint8_t> resized_data(target_width * target_height * 3);
-            stbir_resize_uint8(input_image.data, input_image.width, input_image.height, 0,
-                               resized_data.data(), target_width, target_height, 0, 3);
+            // 1. Resize Image (Float Precision)
+            int channels = 3;
+            std::vector<float> input_data_f(input_image.width * input_image.height * channels);
+            for (size_t i = 0; i < input_data_f.size(); ++i) {
+                input_data_f[i] = (float)input_image.data[i] / 255.0f;
+            }
+
+            std::vector<float> resized_data_f(target_width * target_height * channels);
+            stbir_resize_float(input_data_f.data(), input_image.width, input_image.height, 0,
+                               resized_data_f.data(), target_width, target_height, 0, channels);
 
             struct ggml_init_params params;
             params.mem_size   = static_cast<size_t>(2048 * 1024) * 1024; // 2GB buffer
@@ -143,19 +149,38 @@ struct UpscalerGGML {
             params.no_alloc   = false;
             struct ggml_context* work_ctx = ggml_init(params);
 
-            // 2. Image to Tensor (Normalize -1 to 1)
+            // 2. Image to Tensor
             ggml_tensor* x = ggml_new_tensor_4d(work_ctx, GGML_TYPE_F32, target_width, target_height, 3, 1);
-            sd_image_t resized_img = { (uint32_t)target_width, (uint32_t)target_height, 3, resized_data.data() };
-            sd_image_to_ggml_tensor(resized_img, x);
             
             {
                 float* x_ptr = (float*)x->data;
-                for (int i = 0; i < ggml_nelements(x); i++) {
-                    x_ptr[i] = x_ptr[i] * 2.0f - 1.0f;
+                // Fill tensor from resized_data_f (Interleaved RGB -> Planar RGB) and normalize -1..1
+                for (int y = 0; y < target_height; y++) {
+                    for (int x_c = 0; x_c < target_width; x_c++) {
+                        for (int c = 0; c < 3; c++) {
+                            // Source: Interleaved [H, W, C]
+                            float val = resized_data_f[(y * target_width + x_c) * 3 + c];
+                            
+                            // Dest: Planar [W, H, C] (GGML standard: W fastest, then H, then C)
+                            // Index = c * (W*H) + y * W + x
+                            int dst_idx = c * target_width * target_height + y * target_width + x_c;
+                            
+                            x_ptr[dst_idx] = val * 2.0f - 1.0f;
+                        }
+                    }
                 }
             }
 
             // 3. VAE Encode
+            if (getenv("SD_DUMP_TENSORS")) {
+                FILE* f = fopen("cpp_vae_input.bin", "wb");
+                if (f) {
+                    fwrite(x->data, 1, ggml_nbytes(x), f);
+                    fclose(f);
+                    LOG_INFO("Dumped cpp_vae_input.bin");
+                }
+            }
+
             ggml_tensor* latents = nullptr;
             if (!seedvr2_vae->compute(n_threads, x, false, &latents, work_ctx)) { // false = encode
                 LOG_ERROR("SeedVR2 VAE encode failed");
