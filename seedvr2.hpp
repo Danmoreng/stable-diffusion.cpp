@@ -16,7 +16,7 @@
 namespace SeedVR2 {
 
     // Constants for graph size
-    constexpr int SEEDVR2_GRAPH_SIZE = 20480;
+    constexpr int SEEDVR2_GRAPH_SIZE = 81920;
 
     // --- SeedVR2 Parameters ---
 
@@ -651,9 +651,47 @@ namespace SeedVR2 {
         struct ggml_tensor* forward(GGMLRunnerContext* ctx, struct ggml_tensor* x) {
             x = std::dynamic_pointer_cast<Conv3d>(blocks["upscale_conv"])->forward(ctx, x);
             
-            // PixelShuffle 3D fallback
-            x = ggml_upscale(ctx->ggml_ctx, x, 2, GGML_SCALE_MODE_NEAREST);
-            
+            int64_t w = x->ne[0];
+            int64_t h = x->ne[1];
+            int64_t t = x->ne[2];
+            int64_t c = x->ne[3];
+
+            if (temporal_up) {
+                // PixelShuffle 3D: [W, H, T, C_out * 8] -> [2W, 2H, 2T, C_out]
+                int64_t c_out = c / 8;
+                // For images (T=1), we can simplify or do the full shuffle.
+                // Step 1: [W, H, T, C_out * 2 * 4] -> [W, H, C_out * 8, T]
+                x = ggml_permute(ctx->ggml_ctx, x, 0, 1, 3, 2);
+                x = ggml_cont(ctx->ggml_ctx, x);
+                // Step 2: [W, H, C_out * 8, T] -> [W, H, C_out * 4, T * 2]
+                x = ggml_reshape_4d(ctx->ggml_ctx, x, w, h, c_out * 4, t * 2);
+                // Step 3: [W, H, C_out * 4, T * 2] -> [W, 2, H, 2 * C_out, T * 2]
+                // We'll use multiple steps to stay in 4D.
+                // Actually, let's use a simpler way for 2D shuffle on each slice of T*2.
+                // ggml_pixel_shuffle is not available, so we'll do:
+                // [W, H, C_out*4, N] -> [W, H, 2, 2, C_out, N] -> permute -> [2W, 2H, C_out, N]
+                // Reshape to [W, H, 2, 2 * C_out * t * 2]
+                x = ggml_reshape_4d(ctx->ggml_ctx, x, w, h, 2, 2 * c_out * t * 2);
+                x = ggml_permute(ctx->ggml_ctx, x, 0, 2, 1, 3); // [W, 2, H, 2*C_out*T*2]
+                x = ggml_cont(ctx->ggml_ctx, x);
+                x = ggml_reshape_4d(ctx->ggml_ctx, x, w * 2, h, 2, c_out * t * 2);
+                x = ggml_permute(ctx->ggml_ctx, x, 0, 2, 1, 3); // [2W, 2, H, C_out*T*2]
+                x = ggml_cont(ctx->ggml_ctx, x);
+                x = ggml_reshape_4d(ctx->ggml_ctx, x, w * 2, h * 2, t * 2, c_out);
+            } else {
+                // PixelShuffle 2D: [W, H, T, C_out * 4] -> [2W, 2H, T, C_out]
+                int64_t c_out = c / 4;
+                x = ggml_permute(ctx->ggml_ctx, x, 0, 1, 3, 2); // [W, H, C_out*4, T]
+                x = ggml_cont(ctx->ggml_ctx, x);
+                x = ggml_reshape_4d(ctx->ggml_ctx, x, w, h, 2, 2 * c_out * t);
+                x = ggml_permute(ctx->ggml_ctx, x, 0, 2, 1, 3);
+                x = ggml_cont(ctx->ggml_ctx, x);
+                x = ggml_reshape_4d(ctx->ggml_ctx, x, w * 2, h, 2, c_out * t);
+                x = ggml_permute(ctx->ggml_ctx, x, 0, 2, 1, 3);
+                x = ggml_cont(ctx->ggml_ctx, x);
+                x = ggml_reshape_4d(ctx->ggml_ctx, x, w * 2, h * 2, t, c_out);
+            }
+
             return std::dynamic_pointer_cast<Conv3d>(blocks["conv"])->forward(ctx, x);
         }
     };
@@ -752,11 +790,14 @@ namespace SeedVR2 {
         }
 
         struct ggml_tensor* decode(GGMLRunnerContext* ctx, struct ggml_tensor* z) { 
+            LOG_INFO("VAE decode: start, input shape: [%ld, %ld, %ld, %ld]", z->ne[0], z->ne[1], z->ne[2], z->ne[3]);
             struct ggml_tensor* h = std::dynamic_pointer_cast<Conv3d>(blocks["decoder.conv_in"])->forward(ctx, z);
+            LOG_INFO("VAE decode: mid_block");
             h = std::dynamic_pointer_cast<VAEResnetBlock>(blocks["decoder.mid_block.resnets.0"])->forward(ctx, h);
             h = std::dynamic_pointer_cast<VAEAttnBlock>(blocks["decoder.mid_block.attentions.0"])->forward(ctx, h);
             h = std::dynamic_pointer_cast<VAEResnetBlock>(blocks["decoder.mid_block.resnets.1"])->forward(ctx, h);
             for (int i = 0; i < 4; i++) {
+                LOG_INFO("VAE decode: up_block %d", i);
                 h = std::dynamic_pointer_cast<VAEResnetBlock>(blocks["decoder.up_blocks." + std::to_string(i) + ".resnets.0"])->forward(ctx, h);
                 h = std::dynamic_pointer_cast<VAEResnetBlock>(blocks["decoder.up_blocks." + std::to_string(i) + ".resnets.1"])->forward(ctx, h);
                 h = std::dynamic_pointer_cast<VAEResnetBlock>(blocks["decoder.up_blocks." + std::to_string(i) + ".resnets.2"])->forward(ctx, h);
@@ -764,9 +805,16 @@ namespace SeedVR2 {
                     h = std::dynamic_pointer_cast<VAEUpsample3D>(blocks["decoder.up_blocks." + std::to_string(i) + ".upsamplers.0"])->forward(ctx, h);
                 }
             }
+            LOG_INFO("VAE decode: out");
             h = std::dynamic_pointer_cast<SeedVR2GroupNorm>(blocks["decoder.conv_norm_out"])->forward(ctx, h);
             h = ggml_silu(ctx->ggml_ctx, h);
             h = std::dynamic_pointer_cast<Conv3d>(blocks["decoder.conv_out"])->forward(ctx, h);
+            
+            // VAE output is [W, H, 1, 3] -> Permute to [W, H, 3, 1] for sd_image
+            h = ggml_permute(ctx->ggml_ctx, h, 0, 1, 3, 2);
+            h = ggml_cont(ctx->ggml_ctx, h);
+            
+            LOG_INFO("VAE decode: end");
             return h;
         }
         void init(struct ggml_context* ctx, const String2TensorStorage& tensor_storage_map, const std::string prefix) {
@@ -806,7 +854,7 @@ namespace SeedVR2 {
         }
 
         struct ggml_cgraph* build_graph(struct ggml_tensor* x, struct ggml_tensor* t, struct ggml_tensor* context) {
-            struct ggml_cgraph* gf = ggml_new_graph(compute_ctx);
+            struct ggml_cgraph* gf = ggml_new_graph_custom(compute_ctx, SEEDVR2_GRAPH_SIZE, false);
             auto runner_ctx = get_context();
             struct ggml_tensor* out = model.forward(&runner_ctx, to_backend(x), to_backend(t), to_backend(context));
             ggml_build_forward_expand(gf, out);
@@ -816,7 +864,7 @@ namespace SeedVR2 {
         bool compute(int n_threads, struct ggml_tensor* x, struct ggml_tensor* t, struct ggml_tensor* context, struct ggml_tensor** output, struct ggml_context* output_ctx = nullptr) {
              LOG_INFO("SeedVR2DiT compute start");
              auto get_graph = [&]() -> struct ggml_cgraph* { return build_graph(x, t, context); };
-            bool res = GGMLRunner::compute(get_graph, n_threads, true, output, nullptr);
+            bool res = GGMLRunner::compute(get_graph, n_threads, true, output, output_ctx);
              LOG_INFO("SeedVR2DiT compute end: %s", res ? "success" : "failed");
              return res;
         }
@@ -844,7 +892,7 @@ namespace SeedVR2 {
         bool compute(const int n_threads, struct ggml_tensor* z, bool decode_graph, struct ggml_tensor** output, struct ggml_context* output_ctx = nullptr) override {
             LOG_INFO("SeedVR2VAE compute start (%s)", decode_graph ? "decode" : "encode");
             auto get_graph = [&]() -> struct ggml_cgraph* {
-                struct ggml_cgraph* gf = ggml_new_graph(compute_ctx);
+                struct ggml_cgraph* gf = ggml_new_graph_custom(compute_ctx, SEEDVR2_GRAPH_SIZE, false);
                 auto runner_ctx = get_context();
                 struct ggml_tensor* out = decode_graph ? ae.decode(&runner_ctx, to_backend(z)) : ae.encode(&runner_ctx, to_backend(z));
                 ggml_build_forward_expand(gf, out);

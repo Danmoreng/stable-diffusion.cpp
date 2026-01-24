@@ -179,7 +179,7 @@ struct UpscalerGGML {
             
             // Fetch latents from backend to host
             std::vector<float> latents_host(ggml_nelements(latents));
-            ggml_backend_tensor_get(latents, latents_host.data(), 0, ggml_nbytes(latents));
+            memcpy(latents_host.data(), latents->data, ggml_nbytes(latents));
 
             // Create x_t (noisy latents) on host for reference/noise addition
             // For SR, x_t is initialized with the latents (or noise+latents). 
@@ -332,9 +332,53 @@ struct UpscalerGGML {
                 }
             }
 
-            // 6. VAE Decode
+            // 6. Unpatchify & VAE Decode
+            // upscaled_latents from DiT: [64, N_tokens]
+            // We need to reshape to [lw, lh, 1, 16]
+            LOG_INFO("Unpatchifying DiT output... (lw=%d, lh=%d, n_tokens=%d)", lw, lh, n_tokens);
+            ggml_tensor* unpatchified = ggml_new_tensor_4d(work_ctx, GGML_TYPE_F32, lw, lh, 1, 16);
+            LOG_INFO("Unpatchified tensor created at %p", unpatchified);
+            {
+                if (upscaled_latents == nullptr) {
+                    LOG_ERROR("upscaled_latents is NULL!");
+                    ggml_free(work_ctx);
+                    return {0, 0, 0, nullptr};
+                }
+                LOG_INFO("Copying DiT output to host... upscaled_latents=%p, data=%p, size=%zu bytes", upscaled_latents, upscaled_latents->data, ggml_nbytes(upscaled_latents));
+                std::vector<float> upscaled_host(ggml_nelements(upscaled_latents));
+                memcpy(upscaled_host.data(), upscaled_latents->data, ggml_nbytes(upscaled_latents));
+                
+                LOG_INFO("Starting unpatchify loop...");
+                float* up_src = upscaled_host.data();
+                float* up_dst = (float*)unpatchified->data;
+                
+                int stride_y = lw;
+                int stride_c = lw * lh;
+                
+                for (int ty = 0; ty < n_tokens_h; ty++) {
+                    for (int tx = 0; tx < n_tokens_w; tx++) {
+                        int token_idx = ty * n_tokens_w + tx;
+                        float* token_src = up_src + token_idx * (16 * 2 * 2);
+                        
+                        int src_idx = 0;
+                        for (int c = 0; c < 16; c++) {
+                            for (int py = 0; py < 2; py++) {
+                                for (int px = 0; px < 2; px++) {
+                                    int sx = tx * 2 + px;
+                                    int sy = ty * 2 + py;
+                                    int dst_idx = sx + sy * stride_y + c * stride_c;
+                                    up_dst[dst_idx] = token_src[src_idx++];
+                                }
+                            }
+                        }
+                    }
+                }
+                LOG_INFO("Unpatchify loop finished.");
+            }
+
+            LOG_INFO("Running VAE decode...");
             ggml_tensor* decoded = nullptr;
-            if (!seedvr2_vae->compute(n_threads, upscaled_latents, true, &decoded, work_ctx)) { // true = decode
+            if (!seedvr2_vae->compute(n_threads, unpatchified, true, &decoded, work_ctx)) { // true = decode
                 LOG_ERROR("SeedVR2 VAE decode failed");
                 ggml_free(work_ctx);
                 return {0, 0, 0, nullptr};

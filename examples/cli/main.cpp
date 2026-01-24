@@ -791,7 +791,7 @@ int main(int argc, const char* argv[]) {
                 }
                 sd_image_t current_image = results[i];
                 for (int u = 0; u < gen_params.upscale_repeats; ++u) {
-                    sd_image_t upscaled_image = upscale(upscaler_ctx, current_image, upscale_factor);
+                    sd_image_t upscaled_image = upscale(upscaler_ctx, current_image, gen_params.upscale_factor);
                     if (upscaled_image.data == nullptr) {
                         LOG_ERROR("upscale failed");
                         break;

@@ -1067,6 +1067,7 @@ struct SDGenerationParams {
     float pm_style_strength = 20.f;
 
     int upscale_repeats   = 1;
+    int upscale_factor    = 4;
     int upscale_tile_size = 128;
 
     std::map<std::string, float> lora_map;
@@ -1164,6 +1165,10 @@ struct SDGenerationParams {
              "--upscale-repeats",
              "Run the ESRGAN upscaler this many times (default: 1)",
              &upscale_repeats},
+            {"-f",
+             "--upscale-factor",
+             "upscale factor (default: 4)",
+             &upscale_factor},
             {"",
              "--upscale-tile-size",
              "tile size for ESRGAN upscaling (default: 128)",

@@ -1,45 +1,27 @@
 # Session Progress: SeedVR2 C++ Integration
 
-**Date:** January 22, 2026
-**Status:** C++ Build Fixed, SeedVR2 VAE and DiT Forward Pass Implemented, Runtime Debugging in Progress.
+**Date:** January 24, 2026
+**Status:** Pipeline End-to-End connected, VAE Decode OOM (PixelShuffle Issue).
 
 ## 1. Accomplishments
 
-### 1.1 VAE Implementation (`seedvr2.hpp`)
-*   **Real Implementation:** Replaced the placeholder `VAEParameterBlock` stubs with fully implemented VAE blocks:
-    *   `VAEResnetBlock`: 3D ResNet block with GroupNorm and CausalConv3d.
-    *   `VAEAttnBlock`: 3D Attention block.
-    *   `VAEUpsample3D`: Temporal and spatial upsampling.
-    *   `VAEDownsample3D`: Temporal and spatial downsampling.
-*   **Configuration:** Configured `SeedVR2VAE` with the correct channel dimensions `[128, 256, 512, 512]` and specific temporal scaling rules (e.g., downsample 0 has `kT=1`).
-*   **Custom GroupNorm:** Implemented `SeedVR2GroupNorm` to handle the specific tensor layout `[W, H, T, C]` produced by the 3D convolution operations.
-*   **Forward Pass:** Implemented complete `encode` and `decode` graphs including reshaping and permutation logic to bridge `sd_image_t` and the model's 3D expectation.
+### 1.1 Infrastructure & CLI
+*   **Graph Size:** Increased `SEEDVR2_GRAPH_SIZE` to 81920 in `seedvr2.hpp` to prevent graph overflow during DiT construction.
+*   **Upscale Factor:** Added `--upscale-factor` (default 4) argument to `sd-cli` to allow flexible testing (e.g., 2x upscale to save VRAM).
+*   **Backend Memory:** Replaced `ggml_backend_tensor_get` with `memcpy` in `upscaler.cpp` for host-resident tensors to prevent assertion failures.
 
-### 1.2 DiT Implementation (`seedvr2.hpp`)
-*   **Blocks:** Implemented `AdaSingle` modulation, `NaMMAttention` (with dual-stream support and RoPE parameters), and `NaMMSRTransformerBlock`.
-*   **Forward Pass:** Implemented the full `SeedVR2DiT::forward` pass:
-    *   Timestep embedding generation.
-    *   Input projection (Video & Text).
-    *   Transformer block iteration.
-    *   Final layer norm and projection.
-*   **Unpatchify:** Prepared the output unpatchify logic (currently a pass-through as `patch_size` is handled implicitly).
+### 1.2 DiT Integration
+*   **Context Passing:** Fixed `SeedVR2DiTRunner::compute` to correctly pass the `output_ctx`, ensuring the output tensor is allocated in the correct context.
+*   **Unpatchify:** Implemented the "unpatchify" logic in `upscaler.cpp` to transform the DiT output `[132, N_tokens]` back into the spatial latent format `[W, H, 1, C]` required by the VAE decoder.
 
-### 1.3 Upscaler Integration (`upscaler.cpp`)
-*   **Input Preparation:** Fixed the logic for constructing the DiT input tensor. It now correctly concatenates:
-    *   Noisy latents (`x_t`)
-    *   Condition latents (`latents_cond`)
-    *   Mask channel (ones)
-*   **Dimensions:** Fixed context tensor dimensions to `[5120, 77]` to match the text encoder output.
-
-### 1.4 Build Fixes
-*   **Compilation:** Resolved `ggml_tensor` struct member access errors (`n_dims` -> `ggml_n_dims()`).
-*   **Deprecation:** Updated `ggml_upscale_ext` to `ggml_upscale`.
-*   **Tensor Layout:** Verified tensor shapes using `safetensors` in Python to ensure correct kernel sizes for downsampling/upsampling layers.
+### 1.3 VAE Decoder
+*   **PixelShuffle:** Attempted to implement a manual 2D/3D PixelShuffle mechanism in `VAEUpsample3D` using `ggml_reshape` and `ggml_permute` (as `ggml_pixel_shuffle` is unavailable).
+*   **Status:** The VAE decode graph builds, but execution fails with a massive OOM error (~60GB request), indicating incorrect tensor dimension handling in the custom PixelShuffle logic.
 
 ## 2. Current Challenges
-*   **Runtime Crash:** The application currently crashes with `GGML_ASSERT(ggml_can_repeat(b, a))` inside the VAE encoder, likely during the `GroupNorm` or subsequent arithmetic operations. This indicates a broadcasting mismatch, potentially due to the `[W, H, T, C]` tensor layout produced by `ggml_conv_3d`.
+*   **VAE Decode OOM:** The `VAEUpsample3D` implementation is producing tensors with exploded dimensions, leading to an Out-Of-Memory error on the GPU. The manual reshape/permute sequence for PixelShuffle is likely mathematically correct in concept but implementation details (dimensions order) need debugging.
 
 ## 3. Next Steps
-1.  **Fix VAE Layout/Broadcasting:** Investigate the exact tensor layout expected by `ggml_group_norm` and `ggml_add`/`ggml_mul`. It may be necessary to permute tensors before/after `GroupNorm` or adjust the bias/weight shapes in `SeedVR2GroupNorm`.
-2.  **Verify DiT:** Once VAE encode passes, verify the DiT forward pass with the generated latents.
-3.  **End-to-End Test:** Successfully upscale an image using the full pipeline.
+1.  **Fix PixelShuffle:** detailed review of the `reshape` -> `permute` -> `reshape` chain in `VAEUpsample3D` to ensure it correctly reduces channels while increasing spatial dimensions without creating intermediate massive tensors or wrong shapes.
+2.  **Verify Decode:** Once OOM is resolved, verify the decoded image for correctness (visual artifacts).
+3.  **Optimize:** Remove excessive logging added during debugging.
