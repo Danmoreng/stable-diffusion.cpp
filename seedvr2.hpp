@@ -791,36 +791,114 @@ namespace SeedVR2 {
             int64_t t_ratio = temporal_up ? 2 : 1;
             int64_t c_out   = c / (s_ratio * s_ratio * t_ratio);
             
-            // SeedVR2 layout: (x y z c). c is LSB (fastest), then z, then y, then x is MSB.
-            // Factors: C_out, Z, Y, X.
+            // SeedVR2 layout in channels: (x y z c). 
+            // x (H factor), y (W factor), z (T factor), c (Channels).
+            // einops group (x y z c) means x is most significant, c is least significant.
+            // However, PixelShuffle standard behavior maps Input Channels to Spatial Factors first.
+            // Input C: [Pos00_OutC0, Pos01_OutC0... Pos00_OutC1...]
+            // So Input C varies with Spatial Factor (fastest) then Output Channel (slowest).
+            // Reshape target: [WHT, x, y, z, c_out]
+            // where x,y,z are spatial factors.
+            // Since we are reading Planar Input [WHT, 1, 1, C_in], and C_in is flat.
+            // ggml_reshape reads C_in linearly.
+            // So we want ne[1]=x, ne[2]=y, ne[3]=z, ne[4]=c_out.
             
-            // Step 1: Temporal (Z)
+            // Step 1: Reshape channels into factors
+            // [W*H*T, x, y, z, c_out]
             if (temporal_up) {
-                // Split C into [C_out*4, Z]
-                x = ggml_reshape_4d(ctx->ggml_ctx, x, w*h*t, c_out, 4, 2); 
-                x = ggml_permute(ctx->ggml_ctx, x, 0, 3, 1, 2); // [WHT, Z, C_out, YX]
-                x = ggml_cont(ctx->ggml_ctx, x);
-                x = ggml_reshape_4d(ctx->ggml_ctx, x, w*h, 2*t, c_out, 4);
-                t *= 2;
+                // x=2, y=2, z=2.
+                // ne orders: 0:WHT, 1:x, 2:y, 3:z, 4:c_out
+                x = ggml_reshape_4d(ctx->ggml_ctx, x, w*h*t, 2, 2, 2 * c_out); // Split C_in into [x, y, z*c_out] - limited to 4D reshape
+                x = ggml_reshape_4d(ctx->ggml_ctx, x, w*h*t, 2, 2, 2 * c_out); // this is not enough dims...
+                // GGML supports max 4 dims.
+                // We have WHT, x, y, z, c_out (5 dims).
+                // We can combine some. WHT is large.
+                // We can combine z*c_out.
+                // So [WHT, x, y, z*c_out].
+                // ne[1]=x(2), ne[2]=y(2), ne[3]=z*c_out.
+                // Memory order: x (fastest), y, z*c_out.
+                // This matches PixelShuffle (x is col factor, y is row factor).
+                x = ggml_reshape_4d(ctx->ggml_ctx, x, w*h*t, 2, 2, 2 * c_out);
             } else {
-                x = ggml_reshape_4d(ctx->ggml_ctx, x, w*h, t, c_out, 4);
+                // [WHT, x, y, c_out]
+                x = ggml_reshape_4d(ctx->ggml_ctx, x, w*h*t, 2, 2, c_out);
             }
 
-            // Step 2: Spatial Width (Y)
-            // Current x is [WH, T, C_out, YX]
-            // We want to move Y next to W.
-            x = ggml_reshape_4d(ctx->ggml_ctx, x, w, h*t*c_out, 2, 2); // Split YX into Y, X
-            x = ggml_permute(ctx->ggml_ctx, x, 2, 0, 1, 3); // [Y, W, HTC, X]
+            // Step 2: Spatial Upscaling (X, Y) - Note: x=ne[1] (width factor?), y=ne[2] (height factor?)
+            // PixelShuffle (r): Input(C*r*r).
+            // Order: C varies -> (0,0), (0,1), (1,0), (1,1).
+            // (0,1) is next col. So fast dim is Width Factor.
+            // So ne[1] should be Width Factor (x).
+            // ne[2] should be Height Factor (y).
+            
+            // Current x: [WHT, x, y, Rest].
+            // We want to interleave x with W, y with H.
+            // 1. Split WHT -> W, H, T.
+            // We can't do 5D reshape.
+            // But we can process X (Width) first.
+            // [W*H*T, x, y, Rest].
+            // Permute to [x, W*H*T, y, Rest].
+            // Reshape [x, W, H*T, y, Rest].
+            // Permute [x, W, ...] -> [W, x, ...].
+            // Merge [Wx, ...].
+            
+            // Simplified approach:
+            // x is [WHT, x, y, Rest].
+            // Permute x (ne[1]) to dim 0? No.
+            // We want [W, x, H, y, T, z, c_out].
+            
+            // Let's assume WHT is W * (HT).
+            // Input: [W * (HT), x, y, Rest]
+            // Reshape: [W, HT, x, y, Rest] -> Not possible (5D).
+            
+            // Workaround: Reshape [W, HT, x, y*Rest] (4D).
+            // Permute: [W, x, HT, y*Rest].
+            // Reshape: [Wx, HT, y, Rest].
+            // Now W is 2W.
+            
+            // 1. Interleave W and x.
+            x = ggml_reshape_4d(ctx->ggml_ctx, x, w, h*t, 2, temporal_up ? 2*2*c_out : 2*c_out); // [W, HT, x, Rest]
+            x = ggml_permute(ctx->ggml_ctx, x, 2, 0, 1, 3); // [x, W, HT, Rest]
             x = ggml_cont(ctx->ggml_ctx, x);
-            x = ggml_reshape_4d(ctx->ggml_ctx, x, 2*w, h, t*c_out, 2); // combine Y,W -> 2W. ne[3] is X.
+            x = ggml_reshape_4d(ctx->ggml_ctx, x, 2*w, h*t, temporal_up ? 2*c_out : c_out, 2); // [2W, HT, ZC/C, y] - Note: y is now ne[3]
             w *= 2;
-
-            // Step 3: Spatial Height (X)
-            // x is [2W, H, TC_out, X]
-            x = ggml_permute(ctx->ggml_ctx, x, 0, 3, 1, 2); // [2W, X, H, TC_out]
+            
+            // 2. Interleave H and y.
+            // Current: [W, HT, Rest, y] (Using new W).
+            // We need to split HT -> H, T.
+            // Reshape [W, H, T, Rest, y] (5D impossible).
+            // Reshape [W, H, T*Rest, y].
+            x = ggml_reshape_4d(ctx->ggml_ctx, x, w, h, t * (temporal_up ? 2*c_out : c_out), 2); // [W, H, T*Rest, y]
+            x = ggml_permute(ctx->ggml_ctx, x, 0, 3, 1, 2); // [W, y, H, T*Rest]
             x = ggml_cont(ctx->ggml_ctx, x);
-            x = ggml_reshape_4d(ctx->ggml_ctx, x, w, 2*h, t, c_out); // [2W, 2H, T, C_out]
+            x = ggml_reshape_4d(ctx->ggml_ctx, x, w, 2*h, t, temporal_up ? 2*c_out : c_out); // [W, 2H, T, ZC/C]
             h *= 2;
+            
+            // 3. Temporal Upscaling (Z)
+            if (temporal_up) {
+                // Current: [W, H, T, 2*c_out].
+                // We want to split 2*c_out -> z, c_out.
+                // Reshape [W, H, T, z, c_out] (5D).
+                // Reshape [WH, T, z, c_out].
+                x = ggml_reshape_4d(ctx->ggml_ctx, x, w*h, t, 2, c_out); // [WH, T, z, c_out]
+                x = ggml_permute(ctx->ggml_ctx, x, 0, 2, 1, 3); // [WH, z, T, c_out]
+                x = ggml_cont(ctx->ggml_ctx, x);
+                
+                if (t == 1) {
+                     // remove_head logic for T=1: returns frame 0.
+                     // After permute: [WH, 2, 1, c_out].
+                     // 2 frames: z=0, z=1.
+                     // remove_head keeps z=0.
+                     x = ggml_view_4d(ctx->ggml_ctx, x, w*h, 1, 1, c_out, x->nb[1], x->nb[2], x->nb[3], 0);
+                     x = ggml_cont(ctx->ggml_ctx, x);
+                     x = ggml_reshape_4d(ctx->ggml_ctx, x, w, h, 1, c_out);
+                } else {
+                     x = ggml_reshape_4d(ctx->ggml_ctx, x, w, h, 2*t, c_out);
+                     t *= 2;
+                }
+            } else {
+                // Already [W, H, T, C]
+            }
 
             return std::dynamic_pointer_cast<CausalConv3d>(blocks["conv"])->forward(ctx, x);
         }

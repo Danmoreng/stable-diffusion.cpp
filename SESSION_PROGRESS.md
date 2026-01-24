@@ -30,3 +30,10 @@
 1.  **Debug Weights:** Verify if the provided model weights (`seedvr2_ema_3b_fp16.safetensors`) require specific slice selection for 2D-like inference.
 2.  **Trace Values:** Dump intermediate tensors from C++ (post-DiT, pre-VAE, post-VAE) and compare them numerically with the Python reference dumps to pinpoint exactly where the signal becomes noise.
 3.  **Check Normalization:** Verify if the noise is due to massive scaling issues (float range vs uint8) or data corruption.
+
+## 4. Debugging Session: VAE Loopback (Current Focus)
+
+**Strategy:** Isolate the VAE Decoder by bypassing the DiT entirely ("VAE Loopback").
+*   **Action:** Modified `upscaler.cpp` to feed the encoded latents directly back into the VAE decoder.
+*   **Result:** The output is still noise. This rules out the DiT and confirms the issue is in **Preprocessing -> VAE Encode** OR **VAE Decode -> Postprocessing**.
+*   **Active Refactoring:** `seedvr2.hpp` has been heavily modified to attempt correct `PixelShuffle` logic for 4D/5D dimension mapping (mapping `W, H, T, Factors` to GGML's 4D limits). This logic is complex and currently the suspect for the scrambled output.

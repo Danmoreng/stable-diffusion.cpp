@@ -187,6 +187,22 @@ struct UpscalerGGML {
                 ggml_free(work_ctx);
                 return {0, 0, 0, nullptr};
             }
+            
+            {
+                // Stats for latents
+                double sum = 0.0, sum_sq = 0.0;
+                float min_val = 1e9, max_val = -1e9;
+                for (int i=0; i<ggml_nelements(latents); i++) {
+                    float v = ((float*)latents->data)[i];
+                    sum += v;
+                    sum_sq += v*v;
+                    if (v < min_val) min_val = v;
+                    if (v > max_val) max_val = v;
+                }
+                double mean = sum / ggml_nelements(latents);
+                double std = sqrt(sum_sq / ggml_nelements(latents) - mean*mean);
+                LOG_INFO("Encoded Latents Stats: Mean=%.4f, Std=%.4f, Min=%.4f, Max=%.4f", mean, std, min_val, max_val);
+            }
 
             if (getenv("SD_DUMP_TENSORS")) {
                 FILE* f = fopen("cpp_latents.bin", "wb");
@@ -330,7 +346,10 @@ struct UpscalerGGML {
                 ggml_backend_tensor_set(context, zeros.data(), 0, ggml_nbytes(context));
             }
 
-            // 5. DiT Upscale
+            // 5. DiT Upscale (SKIPPED for VAE Loopback Test)
+            ggml_tensor* upscaled_latents = latents; // Use original latents
+            
+            /*
             ggml_tensor* upscaled_latents = nullptr;
             if (!seedvr2_dit->compute(n_threads, dit_input, t, context, &upscaled_latents, work_ctx)) {
                 LOG_ERROR("SeedVR2 DiT upscale failed");
@@ -340,11 +359,11 @@ struct UpscalerGGML {
                 ggml_free(work_ctx);
                 return {0, 0, 0, nullptr};
             }
+            */
             
-            // Clean up input buffers
-            if (dit_input_buffer) ggml_backend_buffer_free(dit_input_buffer);
-            if (t_buffer) ggml_backend_buffer_free(t_buffer);
-            if (context_buffer) ggml_backend_buffer_free(context_buffer);
+            // Clean up input buffers (if they were allocated)
+            // if (dit_input_buffer) ggml_backend_buffer_free(dit_input_buffer);
+            // ...
 
             if (getenv("SD_DUMP_TENSORS")) {
                 FILE* f = fopen("cpp_upscaled_latents.bin", "wb");
@@ -358,10 +377,18 @@ struct UpscalerGGML {
             // 6. Unpatchify & VAE Decode
             // upscaled_latents from DiT: [64, N_tokens]
             // We need to reshape to [lw, lh, 1, 16]
-            LOG_INFO("Unpatchifying DiT output... (lw=%d, lh=%d, n_tokens=%d)", lw, lh, n_tokens);
-            ggml_tensor* unpatchified = ggml_new_tensor_4d(work_ctx, GGML_TYPE_F32, lw, lh, 1, 16);
-            LOG_INFO("Unpatchified tensor created at %p", unpatchified);
-            {
+            float vae_scaling_factor = 0.9152f;
+            
+            ggml_tensor* unpatchified = nullptr;
+            
+            if (upscaled_latents == latents) {
+                // SKIP UNPATCHIFY for loopback test
+                unpatchified = latents;
+                LOG_INFO("VAE Loopback: Skipping unpatchify, using latents directly.");
+            } else {
+                LOG_INFO("Unpatchifying DiT output... (lw=%d, lh=%d, n_tokens=%d, scaling=%f)", lw, lh, n_tokens, vae_scaling_factor);
+                unpatchified = ggml_new_tensor_4d(work_ctx, GGML_TYPE_F32, lw, lh, 1, 16);
+                
                 if (upscaled_latents == nullptr) {
                     LOG_ERROR("upscaled_latents is NULL!");
                     ggml_free(work_ctx);
@@ -377,11 +404,12 @@ struct UpscalerGGML {
                 
                 int stride_y = lw;
                 int stride_c = lw * lh;
+                float inv_scale = 1.0f / vae_scaling_factor;
                 
                 for (int ty = 0; ty < n_tokens_h; ty++) {
                     for (int tx = 0; tx < n_tokens_w; tx++) {
                         int token_idx = ty * n_tokens_w + tx;
-                        float* token_src = up_src + token_idx * (16 * 2 * 2);
+                        float* token_src = up_src + token_idx * 64;
                         
                         int src_idx = 0;
                         // Data layout is (t h w c), so c varies fastest.
@@ -392,7 +420,8 @@ struct UpscalerGGML {
                                     int sx = tx * 2 + px;
                                     int sy = ty * 2 + py;
                                     int dst_idx = sx + sy * stride_y + c * stride_c;
-                                    up_dst[dst_idx] = token_src[src_idx++];
+                                    
+                                    up_dst[dst_idx] = token_src[src_idx++] * inv_scale;
                                 }
                             }
                         }
@@ -412,6 +441,10 @@ struct UpscalerGGML {
             
             // Tiling params
             int vae_tile_size = 64; // Latent tile size (Input to VAE)
+            if (getenv("SD_FORCE_SINGLE_TILE")) {
+                vae_tile_size = std::max((int)lw, 64);
+                LOG_WARN("!!! SD_FORCE_SINGLE_TILE ENABLED !!! Tile Size: %d", vae_tile_size);
+            }
             float vae_overlap = 0.25f;
             int vae_scale = 8;
 
@@ -433,9 +466,7 @@ struct UpscalerGGML {
                 if (!seedvr2_vae->compute(n_threads, vae_in, true, &vae_out, tile_ctx)) {
                     LOG_ERROR("Tile VAE decode failed");
                 } else {
-                    // vae_out is a host tensor created by seedvr2_vae->compute in tile_ctx.
-                    // Its 'data' pointer is already filled with the decoded pixels.
-                    // We copy it to the 'out' buffer provided by sd_tiling.
+                    // vae_out is already [TileW*8, TileH*8, 3, 1] (ae.decode handles permutation)
                     memcpy(out->data, vae_out->data, ggml_nbytes(out));
                 }
                 
