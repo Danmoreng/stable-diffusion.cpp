@@ -555,6 +555,174 @@ namespace SeedVR2 {
         }
     };
 
+    class CausalConv3d : public GGMLBlock {
+    protected:
+        int64_t in_channels;
+        int64_t out_channels;
+        std::tuple<int, int, int> kernel_size;
+        std::tuple<int, int, int> stride;
+        std::tuple<int, int, int> padding;
+        std::tuple<int, int, int> dilation;
+        bool bias;
+
+        void init_params(struct ggml_context* ctx, const String2TensorStorage& tensor_storage_map = {}, const std::string prefix = "") override {
+            params["weight"] = ggml_new_tensor_4d(ctx,
+                                                  GGML_TYPE_F16,
+                                                  std::get<2>(kernel_size),
+                                                  std::get<1>(kernel_size),
+                                                  std::get<0>(kernel_size),
+                                                  in_channels * out_channels);
+            if (bias) {
+                params["bias"] = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, out_channels);
+            }
+        }
+
+    public:
+        CausalConv3d(int64_t in_channels,
+                     int64_t out_channels,
+                     std::tuple<int, int, int> kernel_size,
+                     std::tuple<int, int, int> stride   = {1, 1, 1},
+                     std::tuple<int, int, int> padding  = {0, 0, 0},
+                     std::tuple<int, int, int> dilation = {1, 1, 1},
+                     bool bias                          = true)
+            : in_channels(in_channels),
+              out_channels(out_channels),
+              kernel_size(std::move(kernel_size)),
+              stride(std::move(stride)),
+              padding(std::move(padding)),
+              dilation(std::move(dilation)),
+              bias(bias) {}
+
+        struct ggml_tensor* forward(GGMLRunnerContext* ctx, struct ggml_tensor* x) {
+            int64_t t = x->ne[2];
+            struct ggml_tensor* w = params["weight"];
+            struct ggml_tensor* b = bias ? params["bias"] : nullptr;
+
+            int kd = std::get<0>(kernel_size);
+            int kh = std::get<1>(kernel_size);
+            int kw = std::get<2>(kernel_size);
+            
+            int pd = std::get<0>(padding);
+            int ph = std::get<1>(padding);
+            int pw = std::get<2>(padding);
+            
+            int sd = std::get<0>(stride);
+            int sh = std::get<1>(stride);
+            int sw = std::get<2>(stride);
+            
+            int dd = std::get<0>(dilation);
+            int dh = std::get<1>(dilation);
+            int dw = std::get<2>(dilation);
+
+            // Decompose 3D conv into loop of 2D convs to avoid im2col_3d OOM
+            // Out[t] = Sum(k=0..kd-1) Conv2d(x[t_in], w[k])
+            
+            std::vector<struct ggml_tensor*> out_frames;
+            
+            // Pre-slice weights [kw, kh, 1, IC*OC]
+            std::vector<struct ggml_tensor*> w_slices(kd);
+            for (int k = 0; k < kd; k++) {
+                struct ggml_tensor* w_k = ggml_view_4d(ctx->ggml_ctx, w, kw, kh, 1, in_channels * out_channels,
+                                                       w->nb[1], w->nb[2], w->nb[3], k * w->nb[2]);
+                w_k = ggml_cont(ctx->ggml_ctx, w_k); // Ensure contiguous for conv2d
+                w_k = ggml_reshape_4d(ctx->ggml_ctx, w_k, kw, kh, in_channels, out_channels);
+                w_slices[k] = w_k;
+            }
+
+            // Pre-slice input frames [W, H, 1, IC] -> [W, H, IC, 1]
+            // We need to reshape input to 2D compatible layout
+            std::vector<struct ggml_tensor*> x_frames(t);
+            for (int i = 0; i < t; i++) {
+                struct ggml_tensor* x_i = ggml_view_4d(ctx->ggml_ctx, x, x->ne[0], x->ne[1], 1, x->ne[3],
+                                                       x->nb[1], x->nb[2], x->nb[3], i * x->nb[2]);
+                x_i = ggml_cont(ctx->ggml_ctx, x_i);
+                x_i = ggml_reshape_4d(ctx->ggml_ctx, x_i, x->ne[0], x->ne[1], in_channels, 1);
+                x_frames[i] = x_i;
+            }
+
+            // Calculate output temporal size
+            int64_t t_out = (t + 2 * pd - dd * (kd - 1) - 1) / sd + 1;
+            
+            for (int i = 0; i < t_out; i++) {
+                struct ggml_tensor* frame_sum = nullptr;
+                
+                for (int k = 0; k < kd; k++) {
+                    int t_in = i * sd - pd + k * dd;
+                    
+                    if (t_in >= 0 && t_in < t) {
+                        // Conv2D(x[t_in], w[k])
+                        // Note: padding_h/w handled here
+                        // bias only added once (usually at end, or distributed?)
+                        // Standard: sum(convs) + bias.
+                        // ggml_ext_conv_2d adds bias if provided. 
+                        // We should pass bias=nullptr for accumulation, and add bias at end?
+                        // Or add bias only on first valid k?
+                        // Let's accumulate convs, then add bias manually.
+                        
+                        struct ggml_tensor* conv_res = ggml_ext_conv_2d(ctx->ggml_ctx, x_frames[t_in], w_slices[k], nullptr,
+                                                                        sw, sh, pw, ph, dw, dh, true); // direct=true
+                        
+                        if (frame_sum == nullptr) {
+                            frame_sum = conv_res;
+                        } else {
+                            frame_sum = ggml_add(ctx->ggml_ctx, frame_sum, conv_res);
+                        }
+                    }
+                }
+                
+                if (frame_sum == nullptr) {
+                    // Create zeros [W_out, H_out, OC, 1]
+                    // Dimensions derived from dummy conv
+                    struct ggml_tensor* dummy = ggml_ext_conv_2d(ctx->ggml_ctx, x_frames[0], w_slices[0], nullptr,
+                                                                 sw, sh, pw, ph, dw, dh, true);
+                    frame_sum = ggml_new_tensor(ctx->ggml_ctx, dummy->type, 4, dummy->ne);
+                    
+                    // Zero init using a constant zero tensor if possible, or scale a zeroed tensor?
+                    // ggml_new_tensor data is undefined. 
+                    // Best way in graph: use ggml_dup of a zero tensor? Or ggml_set_f32?
+                    // ggml_set_f32 sets value immediately on CPU but we are building a graph?
+                    // No, ggml_set_f32 is for CPU/immediate.
+                    // To set zero in graph, use ggml_scale(dummy, 0.0) BUT dummy is uninitialized?
+                    // Multiplying garbage by 0.0 is 0.0 (unless NaN/Inf).
+                    // Safe way: use ggml_repeat of a small zero tensor.
+                    // Or reuse existing zero tensor from ctx?
+                    // Let's use the zero_int_tensor cast to float if available, or just scale dummy.
+                    // Actually, let's trust ggml_scale(..., 0.0f) but ensure dummy is valid tensor (it is output of conv).
+                    // Wait, dummy is output of a conv that is NOT part of the sum? 
+                    // We don't want to compute dummy if we don't use it.
+                    // Better: Create a tensor of zeros using ggml_new_tensor and then map it to a zero-setting op?
+                    // GGML doesn't have "fill" op?
+                    // It has ggml_set_zero? No.
+                    // ggml_new_tensor_4d ...
+                    // If we use 'ggml_ext_zeros' from ggml_extend?
+                    frame_sum = ggml_ext_zeros(ctx->ggml_ctx, dummy->ne[0], dummy->ne[1], dummy->ne[2], dummy->ne[3]);
+                }
+                
+                if (b != nullptr) {
+                    // bias is [OC]. frame_sum is [W, H, OC, 1].
+                    // Reshape b to [1, 1, OC, 1] for broadcast add
+                    struct ggml_tensor* b_reshaped = ggml_reshape_4d(ctx->ggml_ctx, b, 1, 1, out_channels, 1);
+                    frame_sum = ggml_add(ctx->ggml_ctx, frame_sum, b_reshaped);
+                }
+                
+                // frame_sum is [W_out, H_out, OC, 1]
+                // Need to stash for concat.
+                // Output expected: [W_out, H_out, T_out, OC]
+                // Reshape frame_sum to [W_out, H_out, 1, OC]
+                frame_sum = ggml_reshape_4d(ctx->ggml_ctx, frame_sum, frame_sum->ne[0], frame_sum->ne[1], 1, out_channels);
+                out_frames.push_back(frame_sum);
+            }
+            
+            // Concat along T (dim 2)
+            struct ggml_tensor* result = out_frames[0];
+            for (size_t i = 1; i < out_frames.size(); i++) {
+                result = ggml_concat(ctx->ggml_ctx, result, out_frames[i], 2);
+            }
+            
+            return result;
+        }
+    };
+
     class VAEResnetBlock : public GGMLBlock {
     protected:
         int64_t in_channels;
@@ -565,24 +733,26 @@ namespace SeedVR2 {
         VAEResnetBlock(int64_t in_channels, int64_t out_channels, bool use_shortcut)
             : in_channels(in_channels), out_channels(out_channels), use_shortcut(use_shortcut) {
             blocks["norm1"] = std::shared_ptr<GGMLBlock>(new SeedVR2GroupNorm(32, in_channels, 1e-6f, true));
-            blocks["conv1"] = std::shared_ptr<GGMLBlock>(new Conv3d(in_channels, out_channels, {3, 3, 3}, {1, 1, 1}, {1, 1, 1}));
+            blocks["conv1"] = std::shared_ptr<GGMLBlock>(new CausalConv3d(in_channels, out_channels, {3, 3, 3}, {1, 1, 1}, {1, 1, 1}));
             blocks["norm2"] = std::shared_ptr<GGMLBlock>(new SeedVR2GroupNorm(32, out_channels, 1e-6f, true));
-            blocks["conv2"] = std::shared_ptr<GGMLBlock>(new Conv3d(out_channels, out_channels, {3, 3, 3}, {1, 1, 1}, {1, 1, 1}));
+            blocks["conv2"] = std::shared_ptr<GGMLBlock>(new CausalConv3d(out_channels, out_channels, {3, 3, 3}, {1, 1, 1}, {1, 1, 1}));
             if (use_shortcut) {
-                blocks["conv_shortcut"] = std::shared_ptr<GGMLBlock>(new Conv3d(in_channels, out_channels, {1, 1, 1}));
+                blocks["conv_shortcut"] = std::shared_ptr<GGMLBlock>(new CausalConv3d(in_channels, out_channels, {1, 1, 1}));
             }
         }
 
         struct ggml_tensor* forward(GGMLRunnerContext* ctx, struct ggml_tensor* x) {
             struct ggml_tensor* identity = x;
             if (use_shortcut) {
-                identity = std::dynamic_pointer_cast<Conv3d>(blocks["conv_shortcut"])->forward(ctx, identity);
+                identity = std::dynamic_pointer_cast<CausalConv3d>(blocks["conv_shortcut"])->forward(ctx, identity);
             }
             
             auto norm1 = std::dynamic_pointer_cast<SeedVR2GroupNorm>(blocks["norm1"]);
-            auto conv1 = std::dynamic_pointer_cast<Conv3d>(blocks["conv1"]);
+            auto conv1 = std::dynamic_pointer_cast<CausalConv3d>(blocks["conv1"]);
             auto norm2 = std::dynamic_pointer_cast<SeedVR2GroupNorm>(blocks["norm2"]);
-            auto conv2 = std::dynamic_pointer_cast<Conv3d>(blocks["conv2"]);
+            auto conv2 = std::dynamic_pointer_cast<CausalConv3d>(blocks["conv2"]);
+// ... (rest of SeedVR2VAE also updated)
+
             
             struct ggml_tensor* h = x;
             h = norm1->forward(ctx, h);
@@ -644,55 +814,82 @@ namespace SeedVR2 {
     public:
         VAEUpsample3D(int64_t channels, bool temporal_up = true) : channels(channels), temporal_up(temporal_up) {
             int64_t upscale_ratio = temporal_up ? 8 : 4;
-            blocks["upscale_conv"] = std::shared_ptr<GGMLBlock>(new Conv3d(channels, channels * upscale_ratio, {1, 1, 1}));
-            blocks["conv"]         = std::shared_ptr<GGMLBlock>(new Conv3d(channels, channels, {3, 3, 3}, {1, 1, 1}, {1, 1, 1}));
+            blocks["upscale_conv"] = std::shared_ptr<GGMLBlock>(new CausalConv3d(channels, channels * upscale_ratio, {1, 1, 1}));
+            blocks["conv"]         = std::shared_ptr<GGMLBlock>(new CausalConv3d(channels, channels, {3, 3, 3}, {1, 1, 1}, {1, 1, 1}));
         }
 
         struct ggml_tensor* forward(GGMLRunnerContext* ctx, struct ggml_tensor* x) {
-            x = std::dynamic_pointer_cast<Conv3d>(blocks["upscale_conv"])->forward(ctx, x);
+            x = std::dynamic_pointer_cast<CausalConv3d>(blocks["upscale_conv"])->forward(ctx, x);
             
             int64_t w = x->ne[0];
             int64_t h = x->ne[1];
             int64_t t = x->ne[2];
             int64_t c = x->ne[3];
 
-            if (temporal_up) {
-                // PixelShuffle 3D: [W, H, T, C_out * 8] -> [2W, 2H, 2T, C_out]
-                int64_t c_out = c / 8;
-                // For images (T=1), we can simplify or do the full shuffle.
-                // Step 1: [W, H, T, C_out * 2 * 4] -> [W, H, C_out * 8, T]
-                x = ggml_permute(ctx->ggml_ctx, x, 0, 1, 3, 2);
+            int64_t s_ratio = 2;
+            int64_t t_ratio = temporal_up ? 2 : 1;
+            int64_t c_out   = c / (s_ratio * s_ratio * t_ratio);
+            
+            int64_t X = s_ratio; // Height factor
+            int64_t Y = s_ratio; // Width factor
+            int64_t Z = t_ratio; // Temporal factor
+            int64_t XY = X * Y;
+
+            // Pre-Step: Move XY out of C and merge with W*H
+            // C = XY * Z * C_out. 
+            // We want [W*H*XY, T, Z*C_out]
+            x = ggml_reshape_4d(ctx->ggml_ctx, x, w*h, t, XY, Z*c_out);
+            x = ggml_permute(ctx->ggml_ctx, x, 0, 2, 1, 3); // [W*H, XY, T, Z*C_out]
+            x = ggml_cont(ctx->ggml_ctx, x);
+            x = ggml_reshape_4d(ctx->ggml_ctx, x, w*h*XY, t, Z*c_out, 1);
+
+            // Step 1: Temporal (Z -> T)
+            if (Z == 2) {
+                // Input [W*H*XY, T, Z*C_out, 1]
+                // Need [W*H*XY, 2T, C_out, 1]
+                x = ggml_reshape_4d(ctx->ggml_ctx, x, w*h*XY, t, Z, c_out);
+                x = ggml_permute(ctx->ggml_ctx, x, 0, 2, 1, 3); // [W*H*XY, Z, T, C_out]
                 x = ggml_cont(ctx->ggml_ctx, x);
-                // Step 2: [W, H, C_out * 8, T] -> [W, H, C_out * 4, T * 2]
-                x = ggml_reshape_4d(ctx->ggml_ctx, x, w, h, c_out * 4, t * 2);
-                // Step 3: [W, H, C_out * 4, T * 2] -> [W, 2, H, 2 * C_out, T * 2]
-                // We'll use multiple steps to stay in 4D.
-                // Actually, let's use a simpler way for 2D shuffle on each slice of T*2.
-                // ggml_pixel_shuffle is not available, so we'll do:
-                // [W, H, C_out*4, N] -> [W, H, 2, 2, C_out, N] -> permute -> [2W, 2H, C_out, N]
-                // Reshape to [W, H, 2, 2 * C_out * t * 2]
-                x = ggml_reshape_4d(ctx->ggml_ctx, x, w, h, 2, 2 * c_out * t * 2);
-                x = ggml_permute(ctx->ggml_ctx, x, 0, 2, 1, 3); // [W, 2, H, 2*C_out*T*2]
-                x = ggml_cont(ctx->ggml_ctx, x);
-                x = ggml_reshape_4d(ctx->ggml_ctx, x, w * 2, h, 2, c_out * t * 2);
-                x = ggml_permute(ctx->ggml_ctx, x, 0, 2, 1, 3); // [2W, 2, H, C_out*T*2]
-                x = ggml_cont(ctx->ggml_ctx, x);
-                x = ggml_reshape_4d(ctx->ggml_ctx, x, w * 2, h * 2, t * 2, c_out);
+                x = ggml_reshape_4d(ctx->ggml_ctx, x, w*h*XY, Z*t, c_out, 1);
+                t *= 2;
             } else {
-                // PixelShuffle 2D: [W, H, T, C_out * 4] -> [2W, 2H, T, C_out]
-                int64_t c_out = c / 4;
-                x = ggml_permute(ctx->ggml_ctx, x, 0, 1, 3, 2); // [W, H, C_out*4, T]
-                x = ggml_cont(ctx->ggml_ctx, x);
-                x = ggml_reshape_4d(ctx->ggml_ctx, x, w, h, 2, 2 * c_out * t);
-                x = ggml_permute(ctx->ggml_ctx, x, 0, 2, 1, 3);
-                x = ggml_cont(ctx->ggml_ctx, x);
-                x = ggml_reshape_4d(ctx->ggml_ctx, x, w * 2, h, 2, c_out * t);
-                x = ggml_permute(ctx->ggml_ctx, x, 0, 2, 1, 3);
-                x = ggml_cont(ctx->ggml_ctx, x);
-                x = ggml_reshape_4d(ctx->ggml_ctx, x, w * 2, h * 2, t, c_out);
+                x = ggml_reshape_4d(ctx->ggml_ctx, x, w*h*XY, t, c_out, 1);
             }
 
-            return std::dynamic_pointer_cast<Conv3d>(blocks["conv"])->forward(ctx, x);
+            // Step 2: Width (Y -> W)
+            // Input [W*H*XY, T, C_out, 1]
+            // Unpack W*H*XY -> [W, H, Y, X]. Note Y is slower than X in XY packing?
+            // XY comes from C. C layout: (X Y Z C_out).
+            // So X is slow, Y is fast.
+            // XY block in memory: Y changes fastest? No, C layout is X,Y,Z,C.
+            // Flattened l = x*(Y*Z*C) + y*(Z*C) ...
+            // So X is MSB, Y is next.
+            // So in XY block, Y is LSB (fast), X is MSB (slow).
+            // So XY memory order: X0Y0, X0Y1, X1Y0, X1Y1.
+            // So Y varies fastest.
+            // So ne[0]=Y, ne[1]=X in a [Y, X] reshape of XY?
+            // Standard reshape fills ne0 first.
+            // So [Y, X] fills Y first.
+            // Correct.
+            
+            // We unpack W*H*XY.
+            // W is fastest. H is next. XY is next (slowest).
+            // So [W, H, Y, X].
+            x = ggml_reshape_4d(ctx->ggml_ctx, x, w, h, Y, X * t * c_out);
+            x = ggml_permute(ctx->ggml_ctx, x, 2, 0, 1, 3); // [Y, W, H, ...]
+            x = ggml_cont(ctx->ggml_ctx, x);
+            x = ggml_reshape_4d(ctx->ggml_ctx, x, Y*w, h, X * t * c_out, 1);
+            w *= 2;
+
+            // Step 3: Height (X -> H)
+            // Input [W, H, X, T*C_out]
+            x = ggml_reshape_4d(ctx->ggml_ctx, x, w, h, X, t * c_out);
+            x = ggml_permute(ctx->ggml_ctx, x, 0, 2, 1, 3); // [W, X, H, ...]
+            x = ggml_cont(ctx->ggml_ctx, x);
+            x = ggml_reshape_4d(ctx->ggml_ctx, x, w, X*h, t, c_out);
+            h *= 2;
+
+            return std::dynamic_pointer_cast<CausalConv3d>(blocks["conv"])->forward(ctx, x);
         }
     };
 
@@ -703,13 +900,13 @@ namespace SeedVR2 {
 
     public:
         VAEDownsample3D(int64_t channels, bool temporal_down = true) : channels(channels), temporal_down(temporal_down) {
-            blocks["conv"] = std::shared_ptr<GGMLBlock>(new Conv3d(channels, channels, {temporal_down ? 3 : 1, 3, 3}, {temporal_down ? 2 : 1, 2, 2}, {temporal_down ? 1 : 0, 0, 0}));
+            blocks["conv"] = std::shared_ptr<GGMLBlock>(new CausalConv3d(channels, channels, {temporal_down ? 3 : 1, 3, 3}, {temporal_down ? 2 : 1, 2, 2}, {temporal_down ? 1 : 0, 0, 0}));
         }
 
         struct ggml_tensor* forward(GGMLRunnerContext* ctx, struct ggml_tensor* x) {
             // Safe pad (0, 1, 0, 1) spatially like in PyTorch
             x = ggml_ext_pad_ext(ctx->ggml_ctx, x, 0, 1, 0, 1, 0, 0, 0, 0);
-            return std::dynamic_pointer_cast<Conv3d>(blocks["conv"])->forward(ctx, x);
+            return std::dynamic_pointer_cast<CausalConv3d>(blocks["conv"])->forward(ctx, x);
         }
     };
 
@@ -717,7 +914,7 @@ namespace SeedVR2 {
     public:
         SeedVR2VAE(bool decode_only) {
             if (!decode_only) {
-                blocks["encoder.conv_in"] = std::shared_ptr<GGMLBlock>(new Conv3d(3, 128, {3, 3, 3}, {1, 1, 1}, {1, 1, 1}));
+                blocks["encoder.conv_in"] = std::shared_ptr<GGMLBlock>(new CausalConv3d(3, 128, {3, 3, 3}, {1, 1, 1}, {1, 1, 1}));
                 std::vector<int> block_channels = {128, 256, 512, 512};
                 for (int i = 0; i < 4; i++) {
                     int in_c = (i == 0) ? 128 : block_channels[i-1];
@@ -733,10 +930,10 @@ namespace SeedVR2 {
                 blocks["encoder.mid_block.attentions.0"] = std::shared_ptr<GGMLBlock>(new VAEAttnBlock(512));
                 blocks["encoder.mid_block.resnets.1"] = std::shared_ptr<GGMLBlock>(new VAEResnetBlock(512, 512, false));
                 blocks["encoder.conv_norm_out"] = std::shared_ptr<GGMLBlock>(new SeedVR2GroupNorm(32, 512, 1e-6f, true));
-                blocks["encoder.conv_out"] = std::shared_ptr<GGMLBlock>(new Conv3d(512, 32, {3, 3, 3}, {1, 1, 1}, {1, 1, 1}));
+                blocks["encoder.conv_out"] = std::shared_ptr<GGMLBlock>(new CausalConv3d(512, 32, {3, 3, 3}, {1, 1, 1}, {1, 1, 1}));
             }
 
-            blocks["decoder.conv_in"] = std::shared_ptr<GGMLBlock>(new Conv3d(16, 512, {3, 3, 3}, {1, 1, 1}, {1, 1, 1}));
+            blocks["decoder.conv_in"] = std::shared_ptr<GGMLBlock>(new CausalConv3d(16, 512, {3, 3, 3}, {1, 1, 1}, {1, 1, 1}));
             blocks["decoder.mid_block.resnets.0"] = std::shared_ptr<GGMLBlock>(new VAEResnetBlock(512, 512, false));
             blocks["decoder.mid_block.attentions.0"] = std::shared_ptr<GGMLBlock>(new VAEAttnBlock(512));
             blocks["decoder.mid_block.resnets.1"] = std::shared_ptr<GGMLBlock>(new VAEResnetBlock(512, 512, false));
@@ -753,7 +950,7 @@ namespace SeedVR2 {
                 }
             }
             blocks["decoder.conv_norm_out"] = std::shared_ptr<GGMLBlock>(new SeedVR2GroupNorm(32, 128, 1e-6f, true));
-            blocks["decoder.conv_out"] = std::shared_ptr<GGMLBlock>(new Conv3d(128, 3, {3, 3, 3}, {1, 1, 1}, {1, 1, 1}));
+            blocks["decoder.conv_out"] = std::shared_ptr<GGMLBlock>(new CausalConv3d(128, 3, {3, 3, 3}, {1, 1, 1}, {1, 1, 1}));
         }
 
         struct ggml_tensor* encode(GGMLRunnerContext* ctx, struct ggml_tensor* x) { 
@@ -764,7 +961,7 @@ namespace SeedVR2 {
             x = ggml_cont(ctx->ggml_ctx, x);
             
             LOG_INFO("VAE encode: conv_in");
-            x = std::dynamic_pointer_cast<Conv3d>(blocks["encoder.conv_in"])->forward(ctx, x);
+            x = std::dynamic_pointer_cast<CausalConv3d>(blocks["encoder.conv_in"])->forward(ctx, x);
             for (int i = 0; i < 4; i++) {
                 LOG_INFO("VAE encode: down_block %d", i);
                 x = std::dynamic_pointer_cast<VAEResnetBlock>(blocks["encoder.down_blocks." + std::to_string(i) + ".resnets.0"])->forward(ctx, x);
@@ -781,7 +978,7 @@ namespace SeedVR2 {
             LOG_INFO("VAE encode: out");
             x = std::dynamic_pointer_cast<SeedVR2GroupNorm>(blocks["encoder.conv_norm_out"])->forward(ctx, x);
             x = ggml_silu(ctx->ggml_ctx, x);
-            x = std::dynamic_pointer_cast<Conv3d>(blocks["encoder.conv_out"])->forward(ctx, x);
+            x = std::dynamic_pointer_cast<CausalConv3d>(blocks["encoder.conv_out"])->forward(ctx, x);
             
             // Take mean (first 16 channels) - ne[3] is channels
             x = ggml_ext_slice(ctx->ggml_ctx, x, 3, 0, 16);
@@ -791,7 +988,7 @@ namespace SeedVR2 {
 
         struct ggml_tensor* decode(GGMLRunnerContext* ctx, struct ggml_tensor* z) { 
             LOG_INFO("VAE decode: start, input shape: [%ld, %ld, %ld, %ld]", z->ne[0], z->ne[1], z->ne[2], z->ne[3]);
-            struct ggml_tensor* h = std::dynamic_pointer_cast<Conv3d>(blocks["decoder.conv_in"])->forward(ctx, z);
+            struct ggml_tensor* h = std::dynamic_pointer_cast<CausalConv3d>(blocks["decoder.conv_in"])->forward(ctx, z);
             LOG_INFO("VAE decode: mid_block");
             h = std::dynamic_pointer_cast<VAEResnetBlock>(blocks["decoder.mid_block.resnets.0"])->forward(ctx, h);
             h = std::dynamic_pointer_cast<VAEAttnBlock>(blocks["decoder.mid_block.attentions.0"])->forward(ctx, h);
@@ -808,7 +1005,7 @@ namespace SeedVR2 {
             LOG_INFO("VAE decode: out");
             h = std::dynamic_pointer_cast<SeedVR2GroupNorm>(blocks["decoder.conv_norm_out"])->forward(ctx, h);
             h = ggml_silu(ctx->ggml_ctx, h);
-            h = std::dynamic_pointer_cast<Conv3d>(blocks["decoder.conv_out"])->forward(ctx, h);
+            h = std::dynamic_pointer_cast<CausalConv3d>(blocks["decoder.conv_out"])->forward(ctx, h);
             
             // VAE output is [W, H, 1, 3] -> Permute to [W, H, 3, 1] for sd_image
             h = ggml_permute(ctx->ggml_ctx, h, 0, 1, 3, 2);

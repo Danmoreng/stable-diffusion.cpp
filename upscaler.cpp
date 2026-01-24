@@ -376,15 +376,52 @@ struct UpscalerGGML {
                 LOG_INFO("Unpatchify loop finished.");
             }
 
-            LOG_INFO("Running VAE decode...");
-            ggml_tensor* decoded = nullptr;
-            if (!seedvr2_vae->compute(n_threads, unpatchified, true, &decoded, work_ctx)) { // true = decode
-                LOG_ERROR("SeedVR2 VAE decode failed");
-                ggml_free(work_ctx);
-                return {0, 0, 0, nullptr};
-            }
+            LOG_INFO("Running VAE decode (Tiled)...");
+            
+            // Prepare for tiling: View [W, H, 1, 16] as [W, H, 16, 1] so sd_tiling slices correctly
+            ggml_tensor* tile_input = ggml_view_4d(work_ctx, unpatchified, lw, lh, 16, 1,
+                                                  unpatchified->nb[1], unpatchified->nb[2], unpatchified->nb[3], 0);
+            
+            // Final output tensor [TargetW, TargetH, 3, 1]
+            ggml_tensor* decoded = ggml_new_tensor_4d(work_ctx, GGML_TYPE_F32, target_width, target_height, 3, 1);
+            
+            // Tiling params
+            int vae_tile_size = 64; // Latent tile size (Input to VAE)
+            float vae_overlap = 0.25f;
+            int vae_scale = 8;
+
+            LOG_INFO("VAE Tiling: input %dx%d, scale %d, tile_size %d", (int)tile_input->ne[0], (int)tile_input->ne[1], vae_scale, vae_tile_size);
+
+            auto on_tiling = [&](ggml_tensor* in, ggml_tensor* out, bool init) {
+                // in: [TileW, TileH, 16, 1] (Tile Input)
+                // out: [TileW*8, TileH*8, 3, 1] (Tile Output Buffer)
+                
+                // Temp context for this tile's graph management
+                struct ggml_init_params tile_params = { 128 * 1024 * 1024, nullptr, false };
+                struct ggml_context* tile_ctx = ggml_init(tile_params);
+                
+                // Reshape in back to [TileW, TileH, 1, 16] for SeedVR2VAE
+                struct ggml_tensor* vae_in = ggml_view_4d(tile_ctx, in, in->ne[0], in->ne[1], 1, 16,
+                                                         in->nb[1], in->nb[2], in->nb[3], 0);
+                
+                struct ggml_tensor* vae_out = nullptr;
+                if (!seedvr2_vae->compute(n_threads, vae_in, true, &vae_out, tile_ctx)) {
+                    LOG_ERROR("Tile VAE decode failed");
+                } else {
+                    // vae_out is a host tensor created by seedvr2_vae->compute in tile_ctx.
+                    // Its 'data' pointer is already filled with the decoded pixels.
+                    // We copy it to the 'out' buffer provided by sd_tiling.
+                    memcpy(out->data, vae_out->data, ggml_nbytes(out));
+                }
+                
+                seedvr2_vae->free_compute_buffer();
+                ggml_free(tile_ctx);
+            };
+
+            sd_tiling(tile_input, decoded, vae_scale, vae_tile_size, vae_overlap, on_tiling);
 
             // 7. Tensor to Image (Denormalize -1..1 -> 0..1 -> 0..255)
+            LOG_INFO("Converting decoded tensor to final image... output shape: %dx%d", (int)decoded->ne[0], (int)decoded->ne[1]);
             {
                 float* dec_ptr = (float*)decoded->data;
                 for (int i = 0; i < ggml_nelements(decoded); i++) {
