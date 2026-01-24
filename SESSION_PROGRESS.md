@@ -1,27 +1,32 @@
 # Session Progress: SeedVR2 C++ Integration
 
 **Date:** January 24, 2026
-**Status:** Pipeline End-to-End connected, VAE Decode OOM (PixelShuffle Issue).
+**Status:** VAE Decode functional (no OOM), Output is NOISE (Incorrect).
 
 ## 1. Accomplishments
 
 ### 1.1 Infrastructure & CLI
-*   **Graph Size:** Increased `SEEDVR2_GRAPH_SIZE` to 81920 in `seedvr2.hpp` to prevent graph overflow during DiT construction.
-*   **Upscale Factor:** Added `--upscale-factor` (default 4) argument to `sd-cli` to allow flexible testing (e.g., 2x upscale to save VRAM).
-*   **Backend Memory:** Replaced `ggml_backend_tensor_get` with `memcpy` in `upscaler.cpp` for host-resident tensors to prevent assertion failures.
+*   **Graph Size:** Increased `SEEDVR2_GRAPH_SIZE` to 81920 in `seedvr2.hpp` to prevent graph overflow.
+*   **Upscale Factor:** Added `--upscale-factor` (default 4) argument.
+*   **Backend Memory:** Replaced `ggml_backend_tensor_get` with `memcpy` in `upscaler.cpp` for host-resident tensors.
 
 ### 1.2 DiT Integration
-*   **Context Passing:** Fixed `SeedVR2DiTRunner::compute` to correctly pass the `output_ctx`, ensuring the output tensor is allocated in the correct context.
-*   **Unpatchify:** Implemented the "unpatchify" logic in `upscaler.cpp` to transform the DiT output `[132, N_tokens]` back into the spatial latent format `[W, H, 1, C]` required by the VAE decoder.
+*   **Context Passing:** Fixed `SeedVR2DiTRunner::compute` context handling.
+*   **Unpatchify:** Implemented `unpatchify` logic in `upscaler.cpp` to transform DiT output tokens back to latent format.
 
-### 1.3 VAE Decoder
-*   **PixelShuffle:** Attempted to implement a manual 2D/3D PixelShuffle mechanism in `VAEUpsample3D` using `ggml_reshape` and `ggml_permute` (as `ggml_pixel_shuffle` is unavailable).
-*   **Status:** The VAE decode graph builds, but execution fails with a massive OOM error (~60GB request), indicating incorrect tensor dimension handling in the custom PixelShuffle logic.
+### 1.3 VAE Decoder & Upscaler
+*   **Performance:** Optimized `CausalConv3d` to use a loop of 2D convolutions instead of `im2col_3d`. This resolved OOM issues and reduced tile decode time from ~47s to ~2.3s.
+*   **Tiling Fix:** Fixed a bug in `upscaler.cpp` where the tiled VAE input view used the wrong channel stride (`nb3` instead of `nb2`).
+*   **PixelShuffle (VAEUpsample3D):** Overhauled implementation in `seedvr2.hpp` to match SeedVR2's custom `(x y z c)` channel layout.
+    *   Factors are now extracted in `[C_out, Z, Y, X]` order (fastest to slowest).
+    *   Upscaling is performed step-wise: Temporal (`Z`), then Spatial Width (`Y`), then Spatial Height (`X`).
+*   **Causal Padding:** Implemented "replication padding" in `CausalConv3d` using `std::max(0, ...)` logic on temporal indices.
 
 ## 2. Current Challenges
-*   **VAE Decode OOM:** The `VAEUpsample3D` implementation is producing tensors with exploded dimensions, leading to an Out-Of-Memory error on the GPU. The manual reshape/permute sequence for PixelShuffle is likely mathematically correct in concept but implementation details (dimensions order) need debugging.
+*   **Output is Noise:** Despite fixing the stride and layout logic, the output image contains no recognizable content (just noise). This suggests a fundamental mismatch in how data is flowing through the VAE or DiT, or how the weights are being applied.
+*   **Weight Application:** The model weights are 3D. The current C++ implementation sums convolutions over all temporal weight slices. If the reference implementation (ComfyUI/PyTorch) handles these weights differently (e.g., slicing for static images vs. video), this would cause total corruption of the signal.
 
 ## 3. Next Steps
-1.  **Fix PixelShuffle:** detailed review of the `reshape` -> `permute` -> `reshape` chain in `VAEUpsample3D` to ensure it correctly reduces channels while increasing spatial dimensions without creating intermediate massive tensors or wrong shapes.
-2.  **Verify Decode:** Once OOM is resolved, verify the decoded image for correctness (visual artifacts).
-3.  **Optimize:** Remove excessive logging added during debugging.
+1.  **Debug Weights:** Verify if the provided model weights (`seedvr2_ema_3b_fp16.safetensors`) require specific slice selection for 2D-like inference.
+2.  **Trace Values:** Dump intermediate tensors from C++ (post-DiT, pre-VAE, post-VAE) and compare them numerically with the Python reference dumps to pinpoint exactly where the signal becomes noise.
+3.  **Check Normalization:** Verify if the noise is due to massive scaling issues (float range vs uint8) or data corruption.
