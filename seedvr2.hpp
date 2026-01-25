@@ -832,86 +832,70 @@ public:
         int64_t t = x->ne[2];
         int64_t c = x->ne[3];
 
-        // Safety check for shapes to prevent cryptic reshape errors
-        if (c % 2 != 0) {
-             LOG_ERROR("VAEUpsample3D: Channels %ld not divisible by 2 for shuffle", c);
-        }
-
-        // Correct 3D Pixel Shuffle implementation for SeedVR2
-        // Goal: Expand spatial/temporal dims by moving factors from channels.
-        // Upscale logic:
-        // 1. Reshape [W, H, T, C] -> [W, H, T, C/factor, factor]
-        // 2. Permute factor to the correct spatial/temporal dim.
-        
-        // Note: The logic below is complex. We simplify by handling one dimension at a time 
-        // to ensure correctness, rather than big combined reshapes.
-        
         // 1. Width (W) Expansion (factor 2)
-        // Input: [W, H, T, C]
-        // Target: [W*2, H, T, C/2]
+        // Input: [W, H, T, C] -> Target: [2*W, H, T, C/2]
         {
-            x = ggml_reshape_4d(ctx->ggml_ctx, x, w, h*t, c/2, 2); 
-            // [W, H*T, C/2, 2]
-            // Permute 2 (last dim) to be adjacent to W.
-            // We want [2, W, H*T, C/2].
-            // Scatter: W(0)->1, HT(1)->2, C2(2)->3, 2(3)->0. Args: 1, 2, 3, 0.
-            x = ggml_permute(ctx->ggml_ctx, x, 1, 2, 3, 0);
+            // Reshape [W, H, T, C] -> [W, H*T, 2, C/2]
+            // Note: We split C (ne3) into (2, C/2).
+            // ne2 becomes 2 (fast), ne3 becomes C/2 (slow).
+            // This ensures adjacent channels (0,1) are grouped.
+            x = ggml_reshape_4d(ctx->ggml_ctx, x, w, h*t, 2, c/2); 
+            
+            // Permute: Move '2' (dim 2) to W (dim 0)
+            // Current: [W, HT, 2, C2]. We want [2, W, HT, C2].
+            // Args: 2, 0, 1, 3
+            x = ggml_permute(ctx->ggml_ctx, x, 2, 0, 1, 3);
             x = ggml_cont(ctx->ggml_ctx, x);
-            // Reshape to merge [2, W] -> [2*W]
+            
+            // Merge [2, W] -> [2*W]
             x = ggml_reshape_4d(ctx->ggml_ctx, x, 2*w, h, t, c/2);
             w *= 2;
             c /= 2;
         }
 
         // 2. Height (H) Expansion (factor 2)
-        // Input: [W, H, T, C]
-        // Target: [W, H*2, T, C/2]
+        // Input: [W, H, T, C] -> Target: [W, 2*H, T, C/2]
         {
-            x = ggml_reshape_4d(ctx->ggml_ctx, x, w, h, t*(c/2), 2);
-            // [W, H, T*C/2, 2]
-            // Permute 2 (last) to be adjacent to H (dim 1).
-            // [W, 2, H, T*C/2]
-            // Scatter: W(0)->0, H(1)->2, TC(2)->3, 2(3)->1. Args: 0, 2, 3, 1.
-            x = ggml_permute(ctx->ggml_ctx, x, 0, 2, 3, 1);
+            // Reshape [W, H, T, C] -> [W, H, 2, C/2 * T] (Merge T and C/2 temporarily)
+            x = ggml_reshape_4d(ctx->ggml_ctx, x, w, h, 2, t*(c/2));
+            
+            // Permute: Move '2' (dim 2) to H (dim 1)
+            // Current: [W, H, 2, Rest]. We want [W, 2, H, Rest].
+            // Args: 0, 2, 1, 3
+            x = ggml_permute(ctx->ggml_ctx, x, 0, 2, 1, 3);
             x = ggml_cont(ctx->ggml_ctx, x);
+            
             // Merge [2, H] -> [2*H]
             x = ggml_reshape_4d(ctx->ggml_ctx, x, w, 2*h, t, c/2);
             h *= 2;
             c /= 2;
         }
 
-        // 3. Time (T) Expansion (factor 2 if temporal_up)
+        // 3. Time (T) Expansion
         if (temporal_up) {
-             x = ggml_reshape_4d(ctx->ggml_ctx, x, w*h, t, c/2, 2);
-             // [WH, T, C/2, 2]
-             // Permute to [WH, 2, T, C/2]
-             // Scatter: WH(0)->0, T(1)->2, C2(2)->3, 2(3)->1. Args: 0, 2, 3, 1.
-             x = ggml_permute(ctx->ggml_ctx, x, 0, 2, 3, 1);
+             // Reshape [W, H, T, C] -> [WH, T, 2, C/2]
+             x = ggml_reshape_4d(ctx->ggml_ctx, x, w*h, t, 2, c/2);
+             
+             // Permute: Move '2' (dim 2) to T (dim 1)
+             // Current: [WH, T, 2, C2]. We want [WH, 2, T, C2].
+             // Args: 0, 2, 1, 3
+             x = ggml_permute(ctx->ggml_ctx, x, 0, 2, 1, 3);
              x = ggml_cont(ctx->ggml_ctx, x);
-             // Reshape to [W, H, 2*T, C/2]
+             
+             // Merge [2, T] -> [2*T]
              x = ggml_reshape_4d(ctx->ggml_ctx, x, w, h, 2*t, c/2);
              
-             // Causal Inflation remove_head logic:
-             // Input sequence F0, F1, F2... expanded to F0a, F0b, F1a, F1b...
-             // remove_head(times=1) keeps F0a, drops F0b, keeps F1a...
-             // i.e., keeps index 0, drops index 1, keeps index 2..end.
-             
+             // Causal remove_head logic (Keep as is)
              int64_t t_new = 2 * t;
-             
-             // Part 1: Keep Frame 0
              struct ggml_tensor* part1 = ggml_view_4d(ctx->ggml_ctx, x, w, h, 1, c/2, x->nb[1], x->nb[2], x->nb[3], 0);
-             
              if (t_new > 2) {
-                 // Part 2: Keep Frame 2 to End
                  struct ggml_tensor* part2 = ggml_view_4d(ctx->ggml_ctx, x, w, h, t_new - 2, c/2, x->nb[1], x->nb[2], x->nb[3], 2 * x->nb[2]);
-                 x = ggml_concat(ctx->ggml_ctx, part1, part2, 2); // Concat along T (dim 2)
+                 x = ggml_concat(ctx->ggml_ctx, part1, part2, 2);
                  t = t_new - 1;
              } else {
-                 // If t_new == 2 (was t=1), we drop index 1, so we just keep part 1.
                  x = part1;
                  t = 1;
              }
-             
              c /= 2;
         }
 

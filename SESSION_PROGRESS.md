@@ -1,7 +1,7 @@
 # Session Progress: SeedVR2 C++ Integration
 
-**Date:** January 24, 2026
-**Status:** VAE Decode functional (no OOM), Output is NOISE (Incorrect).
+**Date:** January 25, 2026
+**Status:** VAE Loopback Successful (Encode -> Decode verified). DiT pending.
 
 ## 1. Accomplishments
 
@@ -22,18 +22,17 @@
     *   Upscaling is performed step-wise: Temporal (`Z`), then Spatial Width (`Y`), then Spatial Height (`X`).
 *   **Causal Padding:** Implemented "replication padding" in `CausalConv3d` using `std::max(0, ...)` logic on temporal indices.
 
+### 1.4 VAE Correction (Critical Fixes)
+*   **GroupNorm:** Corrected `SeedVR2GroupNorm` to perform per-frame normalization (spatial only) by treating `T` as the batch dimension in `ggml_group_norm`.
+*   **Upsample Logic:** Implemented correct `remove_head` slicing logic in `VAEUpsample3D` for all temporal upscaling cases, dropping the second frame (index 1) to match "Tail" inflation mode.
+*   **Attention:** Fixed `ggml_permute` arguments in `VAEAttnBlock` to use correct scatter semantics (`1, 2, 3, 0` for input, `3, 0, 1, 2` for output).
+
 ## 2. Current Challenges
-*   **Output is Noise:** Despite fixing the stride and layout logic, the output image contains no recognizable content (just noise). This suggests a fundamental mismatch in how data is flowing through the VAE or DiT, or how the weights are being applied.
+*   **DiT 3D RoPE:** The DiT currently lacks a functional 3D Rotary Positional Embedding (RoPE) implementation. The current `SeedVR2RoPE` is a placeholder. Enabling DiT without this will likely result in geometric incoherence or noise.
 *   **Weight Application:** The model weights are 3D. The current C++ implementation sums convolutions over all temporal weight slices. If the reference implementation (ComfyUI/PyTorch) handles these weights differently (e.g., slicing for static images vs. video), this would cause total corruption of the signal.
 
 ## 3. Next Steps
-1.  **Debug Weights:** Verify if the provided model weights (`seedvr2_ema_3b_fp16.safetensors`) require specific slice selection for 2D-like inference.
-2.  **Trace Values:** Dump intermediate tensors from C++ (post-DiT, pre-VAE, post-VAE) and compare them numerically with the Python reference dumps to pinpoint exactly where the signal becomes noise.
-3.  **Check Normalization:** Verify if the noise is due to massive scaling issues (float range vs uint8) or data corruption.
-
-## 4. Debugging Session: VAE Loopback (Current Focus)
-
-**Strategy:** Isolate the VAE Decoder by bypassing the DiT entirely ("VAE Loopback").
-*   **Action:** Modified `upscaler.cpp` to feed the encoded latents directly back into the VAE decoder.
-*   **Result:** The output is still noise. This rules out the DiT and confirms the issue is in **Preprocessing -> VAE Encode** OR **VAE Decode -> Postprocessing**.
-*   **Active Refactoring:** `seedvr2.hpp` has been heavily modified to attempt correct `PixelShuffle` logic for 4D/5D dimension mapping (mapping `W, H, T, Factors` to GGML's 4D limits). This logic is complex and currently the suspect for the scrambled output.
+1.  **Enable DiT:** Uncomment the DiT computation in `upscaler.cpp` and verify if the signal passes through (even if geometrically distorted).
+2.  **Implement RoPE:** Port the 3D RoPE logic from Python to C++, handling spatial and temporal frequency components correctly.
+3.  **Debug Weights:** Verify if the provided model weights (`seedvr2_ema_3b_fp16.safetensors`) require specific slice selection for 2D-like inference.
+4.  **Trace Values:** Dump intermediate tensors from C++ (post-DiT, pre-VAE, post-VAE) and compare them numerically with the Python reference dumps to pinpoint exactly where the signal becomes noise.

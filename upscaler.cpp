@@ -132,6 +132,37 @@ struct UpscalerGGML {
 
             LOG_INFO("SeedVR2 upscaling to %dx%d", target_width, target_height);
 
+            auto tensor_to_f32 = [&](ggml_tensor * t, std::vector<float> & out) {
+                const int64_t n = ggml_nelements(t);
+                out.resize(n);
+
+                if (t->buffer) {
+                    if (t->type == GGML_TYPE_F32) {
+                        ggml_backend_tensor_get(t, out.data(), 0, n * sizeof(float));
+                        return;
+                    }
+
+                    if (t->type == GGML_TYPE_F16) {
+                        std::vector<ggml_fp16_t> tmp(n);
+                        ggml_backend_tensor_get(t, tmp.data(), 0, n * sizeof(ggml_fp16_t));
+                        ggml_fp16_to_fp32_row(tmp.data(), out.data(), n);
+                        return;
+                    }
+                } else {
+                    // Host memory fallback
+                     if (t->type == GGML_TYPE_F32) {
+                        memcpy(out.data(), t->data, n * sizeof(float));
+                        return;
+                    }
+                    if (t->type == GGML_TYPE_F16) {
+                        ggml_fp16_to_fp32_row((ggml_fp16_t*)t->data, out.data(), n);
+                        return;
+                    }
+                }
+
+                LOG_ERROR("tensor_to_f32: unsupported type %s", ggml_type_name(t->type));
+            };
+
             // 1. Resize Image (Float Precision)
             int channels = 3;
             std::vector<float> input_data_f(input_image.width * input_image.height * channels);
@@ -219,8 +250,13 @@ struct UpscalerGGML {
             int lh = latents->ne[1];
             
             // Fetch latents from backend to host
-            std::vector<float> latents_host(ggml_nelements(latents));
-            memcpy(latents_host.data(), latents->data, ggml_nbytes(latents));
+            std::vector<float> latents_host;
+            tensor_to_f32(latents, latents_host);
+
+            LOG_INFO("latents type=%s nbytes=%zu ne=%ld",
+                 ggml_type_name(latents->type),
+                 ggml_nbytes(latents),
+                 ggml_nelements(latents));
 
             // Create x_t (noisy latents) on host for reference/noise addition
             // For SR, x_t is initialized with the latents (or noise+latents). 
@@ -276,9 +312,9 @@ struct UpscalerGGML {
                     int dst_idx = 0;
 
                     // 1. x_t (16 channels)
-                    for (int py = 0; py < patch_size; py++) {
-                        for (int px = 0; px < patch_size; px++) {
-                            for (int c = 0; c < 16; c++) {
+                    for (int c = 0; c < 16; c++) {
+                        for (int py = 0; py < patch_size; py++) {
+                            for (int px = 0; px < patch_size; px++) {
                                 int sx = tx * patch_size + px;
                                 int sy = ty * patch_size + py;
                                 int src_idx = sx + sy * stride_y + c * stride_c;
@@ -288,9 +324,9 @@ struct UpscalerGGML {
                     }
 
                     // 2. latents_cond (16 channels)
-                    for (int py = 0; py < patch_size; py++) {
-                        for (int px = 0; px < patch_size; px++) {
-                            for (int c = 0; c < 16; c++) {
+                    for (int c = 0; c < 16; c++) {
+                        for (int py = 0; py < patch_size; py++) {
+                            for (int px = 0; px < patch_size; px++) {
                                 int sx = tx * patch_size + px;
                                 int sy = ty * patch_size + py;
                                 int src_idx = sx + sy * stride_y + c * stride_c;
@@ -346,10 +382,7 @@ struct UpscalerGGML {
                 ggml_backend_tensor_set(context, zeros.data(), 0, ggml_nbytes(context));
             }
 
-            // 5. DiT Upscale (SKIPPED for VAE Loopback Test)
-            ggml_tensor* upscaled_latents = latents; // Use original latents
-            
-            /*
+            // 5. DiT Upscale
             ggml_tensor* upscaled_latents = nullptr;
             if (!seedvr2_dit->compute(n_threads, dit_input, t, context, &upscaled_latents, work_ctx)) {
                 LOG_ERROR("SeedVR2 DiT upscale failed");
@@ -359,11 +392,11 @@ struct UpscalerGGML {
                 ggml_free(work_ctx);
                 return {0, 0, 0, nullptr};
             }
-            */
             
             // Clean up input buffers (if they were allocated)
-            // if (dit_input_buffer) ggml_backend_buffer_free(dit_input_buffer);
-            // ...
+            if (dit_input_buffer) ggml_backend_buffer_free(dit_input_buffer);
+            if (t_buffer) ggml_backend_buffer_free(t_buffer);
+            if (context_buffer) ggml_backend_buffer_free(context_buffer);
 
             if (getenv("SD_DUMP_TENSORS")) {
                 FILE* f = fopen("cpp_upscaled_latents.bin", "wb");
@@ -394,40 +427,61 @@ struct UpscalerGGML {
                     ggml_free(work_ctx);
                     return {0, 0, 0, nullptr};
                 }
-                LOG_INFO("Copying DiT output to host... upscaled_latents=%p, data=%p, size=%zu bytes", upscaled_latents, upscaled_latents->data, ggml_nbytes(upscaled_latents));
-                std::vector<float> upscaled_host(ggml_nelements(upscaled_latents));
-                memcpy(upscaled_host.data(), upscaled_latents->data, ggml_nbytes(upscaled_latents));
                 
-                LOG_INFO("Starting unpatchify loop...");
-                float* up_src = upscaled_host.data();
-                float* up_dst = (float*)unpatchified->data;
+                LOG_INFO("Unpatchifying DiT output... (lw=%d, lh=%d, n_tokens=%d, scaling=%f)", lw, lh, n_tokens, vae_scaling_factor);
                 
-                int stride_y = lw;
-                int stride_c = lw * lh;
-                float inv_scale = 1.0f / vae_scaling_factor;
+                // Copy to host vector for easier iteration
+                std::vector<float> upscaled_host;
+                tensor_to_f32(upscaled_latents, upscaled_host);
+
+                LOG_INFO("dit_out type=%s nbytes=%zu ne=%ld",
+                     ggml_type_name(upscaled_latents->type),
+                     ggml_nbytes(upscaled_latents),
+                     ggml_nelements(upscaled_latents));
                 
-                for (int ty = 0; ty < n_tokens_h; ty++) {
-                    for (int tx = 0; tx < n_tokens_w; tx++) {
-                        int token_idx = ty * n_tokens_w + tx;
-                        float* token_src = up_src + token_idx * 64;
-                        
-                        int src_idx = 0;
-                        // Data layout is (t h w c), so c varies fastest.
-                        // t=1, h=2, w=2, c=16.
-                        for (int py = 0; py < 2; py++) {
-                            for (int px = 0; px < 2; px++) {
-                                for (int c = 0; c < 16; c++) {
-                                    int sx = tx * 2 + px;
-                                    int sy = ty * 2 + py;
-                                    int dst_idx = sx + sy * stride_y + c * stride_c;
-                                    
-                                    up_dst[dst_idx] = token_src[src_idx++] * inv_scale;
-                                }
+                float* src = upscaled_host.data();
+                float* dst = (float*)unpatchified->data;
+                
+                int patch_size_w = 2;
+                int patch_size_h = 2;
+                int channels = 16; // from config
+                int n_patches_w = lw / patch_size_w; // 64
+                
+                // Validate dimensions
+                if (ggml_nelements(upscaled_latents) != n_tokens * patch_size_w * patch_size_h * channels) {
+                     LOG_ERROR("Dimension mismatch in unpatchify! DiT output size: %ld, Expected: %d", ggml_nelements(upscaled_latents), n_tokens * patch_size_w * patch_size_h * channels);
+                }
+
+                // Iterate tokens (patches)
+                for (int i = 0; i < n_tokens; i++) {
+                    int patch_y = i / n_patches_w;
+                    int patch_x = i % n_patches_w;
+                    
+                    // Base offset for this token in the source array
+                    int token_offset = i * (channels * patch_size_w * patch_size_h);
+                    
+                    for (int py = 0; py < patch_size_h; py++) {
+                        for (int px = 0; px < patch_size_w; px++) {
+                            for (int c = 0; c < channels; c++) {
+                                // CORRECTED READ LOGIC:
+                                // Assume DiT output is Planar: [Channel, Height, Width]
+                                // Index = c * (H*W) + py * W + px
+                                int src_idx_rel = c * (patch_size_h * patch_size_w) + py * patch_size_w + px;
+                                float val = upscaled_host[token_offset + src_idx_rel];
+                                
+                                // Destination Logic (Unchanged, this is correct for GGML)
+                                int global_x = patch_x * patch_size_w + px;
+                                int global_y = patch_y * patch_size_h + py;
+                                
+                                // GGML Tensor [W, H, C] -> Index = x + y*W + c*(W*H)
+                                int dst_idx = global_x + global_y * lw + c * (lw * lh);
+                                
+                                dst[dst_idx] = val / vae_scaling_factor;
                             }
                         }
                     }
                 }
-                LOG_INFO("Unpatchify loop finished.");
+                LOG_INFO("Unpatchify completed.");
             }
 
             LOG_INFO("Running VAE decode (Tiled)...");
