@@ -575,11 +575,6 @@ protected:
                                               std::get<1>(kernel_size),
                                               std::get<0>(kernel_size),
                                               in_channels * out_channels);
-        
-        LOG_INFO("CausalConv3d init_params: %s weight ne=[%ld, %ld, %ld, %ld]", 
-                 prefix.c_str(), 
-                 params["weight"]->ne[0], params["weight"]->ne[1], 
-                 params["weight"]->ne[2], params["weight"]->ne[3]);
 
         if (bias) {
             params["bias"] = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, out_channels);
@@ -781,14 +776,10 @@ public:
         
         out = std::dynamic_pointer_cast<Linear>(blocks["to_out.0"])->forward(ctx, out);
         
-        // LOGGING THE SHAPE JOURNEY
-        LOG_INFO("VAEAttn debug: linear_out ne=[%ld, %ld, %ld, %ld]", out->ne[0], out->ne[1], out->ne[2], out->ne[3]);
-        
         // Reshape back to [C, W, H, T]
         // We need to be careful. The linear output is [C, N*T] (contiguous C first).
         // We want [C, W, H, T].
         out = ggml_reshape_4d(ctx->ggml_ctx, out, c, w, h, t);
-        LOG_INFO("VAEAttn debug: reshape_4d ne=[%ld, %ld, %ld, %ld]", out->ne[0], out->ne[1], out->ne[2], out->ne[3]);
         
         // Permute back to [W, H, T, C]
         // [C, W, H, T] -> [W, H, T, C]
@@ -805,16 +796,6 @@ public:
         out = ggml_permute(ctx->ggml_ctx, out, 3, 0, 1, 2);
         out = ggml_cont(ctx->ggml_ctx, out);
         
-        LOG_INFO("VAEAttn debug: permute_cont ne=[%ld, %ld, %ld, %ld]", out->ne[0], out->ne[1], out->ne[2], out->ne[3]);
-        
-        if (ggml_nelements(out) != ggml_nelements(identity) || 
-            out->ne[0] != identity->ne[0] || out->ne[1] != identity->ne[1] || 
-            out->ne[2] != identity->ne[2] || out->ne[3] != identity->ne[3]) {
-            LOG_ERROR("VAEAttnBlock shape mismatch: out=[%ld, %ld, %ld, %ld], identity=[%ld, %ld, %ld, %ld]",
-                      out->ne[0], out->ne[1], out->ne[2], out->ne[3],
-                      identity->ne[0], identity->ne[1], identity->ne[2], identity->ne[3]);
-        }
-
         return ggml_add(ctx->ggml_ctx, out, identity);
     }
 };
@@ -886,10 +867,11 @@ public:
                     LOG_INFO("VAEUpsample3D(REF) after width x2: [%ld, %ld, %ld, %ld]", x->ne[0], x->ne[1], x->ne[2], x->ne[3]);
                 }
             } else {
-                // axis0 (w) -> 1, axis1 (h*t) -> 2, axis2 (2) -> 0, axis3 (c/2) -> 3
+                // axis0 (w) -> 2, axis1 (h*t) -> 0, axis2 (2) -> 1, axis3 (c/2) -> 3
+                // New0=Old2(2), New1=Old0(w), New2=Old1(ht), New3=Old3(c/2)
                 // Result: [2, W, HT, C2]
                 x = ggml_reshape_4d(ctx->ggml_ctx, x, w, h*t, 2, c/2); 
-                x = ggml_permute(ctx->ggml_ctx, x, 1, 2, 0, 3);
+                x = ggml_permute(ctx->ggml_ctx, x, 2, 0, 1, 3);
                 x = ggml_cont(ctx->ggml_ctx, x);
                 x = ggml_reshape_4d(ctx->ggml_ctx, x, 2*w, h, t, c/2);
                 w *= 2;
