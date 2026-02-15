@@ -575,6 +575,12 @@ protected:
                                               std::get<1>(kernel_size),
                                               std::get<0>(kernel_size),
                                               in_channels * out_channels);
+        
+        LOG_INFO("CausalConv3d init_params: %s weight ne=[%ld, %ld, %ld, %ld]", 
+                 prefix.c_str(), 
+                 params["weight"]->ne[0], params["weight"]->ne[1], 
+                 params["weight"]->ne[2], params["weight"]->ne[3]);
+
         if (bias) {
             params["bias"] = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, out_channels);
         }
@@ -623,6 +629,7 @@ public:
         for (int k = 0; k < kd; k++) {
             struct ggml_tensor* w_k = ggml_view_4d(ctx->ggml_ctx, w, kw, kh, 1, in_channels * out_channels,
                                                    w->nb[1], w->nb[2], w->nb[3], k * w->nb[2]);
+            
             w_k = ggml_cont(ctx->ggml_ctx, w_k); 
             w_k = ggml_reshape_4d(ctx->ggml_ctx, w_k, kw, kh, in_channels, out_channels);
             w_slices[k] = w_k;
@@ -825,6 +832,13 @@ public:
     }
 
     struct ggml_tensor* forward(GGMLRunnerContext* ctx, struct ggml_tensor* x) {
+        const bool disable_temporal_up_runtime = getenv("SD_SEEDVR2_DISABLE_TEMPORAL_UP") != nullptr;
+        const bool trace_shapes = getenv("SD_SEEDVR2_TRACE_SHAPES") != nullptr;
+        if (trace_shapes) {
+            LOG_INFO("VAEUpsample3D start (temporal_up=%d, disable_temporal_up_runtime=%d): [%ld, %ld, %ld, %ld]",
+                     temporal_up ? 1 : 0, disable_temporal_up_runtime ? 1 : 0,
+                     x->ne[0], x->ne[1], x->ne[2], x->ne[3]);
+        }
         x = std::dynamic_pointer_cast<CausalConv3d>(blocks["upscale_conv"])->forward(ctx, x);
         
         int64_t w = x->ne[0];
@@ -832,74 +846,156 @@ public:
         int64_t t = x->ne[2];
         int64_t c = x->ne[3];
 
-        // 1. Width (W) Expansion (factor 2)
-        // Input: [W, H, T, C] -> Target: [2*W, H, T, C/2]
-        {
-            // Reshape [W, H, T, C] -> [W, H*T, 2, C/2]
-            // Note: We split C (ne3) into (2, C/2).
-            // ne2 becomes 2 (fast), ne3 becomes C/2 (slow).
-            // This ensures adjacent channels (0,1) are grouped.
-            x = ggml_reshape_4d(ctx->ggml_ctx, x, w, h*t, 2, c/2); 
-            
-            // Permute: Move '2' (dim 2) to W (dim 0)
-            // Current: [W, HT, 2, C2]. We want [2, W, HT, C2].
-            // Args: 2, 0, 1, 3
-            x = ggml_permute(ctx->ggml_ctx, x, 2, 0, 1, 3);
-            x = ggml_cont(ctx->ggml_ctx, x);
-            
-            // Merge [2, W] -> [2*W]
-            x = ggml_reshape_4d(ctx->ggml_ctx, x, 2*w, h, t, c/2);
-            w *= 2;
-            c /= 2;
-        }
+        auto apply_width_x2 = [&]() {
+            bool use_ref = getenv("SD_SEEDVR2_UPSAMPLE_HOST_REF") != nullptr;
+            if (use_ref) {
+                // Explicit gather/scatter reference implementation (slow graph build, but explicit layout)
+                // x: [W, H, T, C]
+                // We split C into 2 parts: C_0 and C_1.
+                // Output is [2W, H, T, C/2] where we interleave w_0(C_0), w_0(C_1), w_1(C_0), w_1(C_1)...
+                
+                int64_t c2 = c / 2;
+                struct ggml_tensor* x_c0 = ggml_ext_slice(ctx->ggml_ctx, x, 3, 0, c2);
+                struct ggml_tensor* x_c1 = ggml_ext_slice(ctx->ggml_ctx, x, 3, c2, c);
+                
+                // We need to interleave these along W (dim 0).
+                // Since we can't easily interleave elements in GGML without permute (which is what we are debugging),
+                // we iterate W slices and concat them.
+                
+                std::vector<struct ggml_tensor*> cols;
+                for (int i = 0; i < w; i++) {
+                    // Slice w=i from c0 and c1
+                    struct ggml_tensor* col_0 = ggml_ext_slice(ctx->ggml_ctx, x_c0, 0, i, i + 1); // [1, H, T, C/2]
+                    struct ggml_tensor* col_1 = ggml_ext_slice(ctx->ggml_ctx, x_c1, 0, i, i + 1); // [1, H, T, C/2]
+                    col_0 = ggml_cont(ctx->ggml_ctx, col_0);
+                    col_1 = ggml_cont(ctx->ggml_ctx, col_1);
+                    cols.push_back(col_0);
+                    cols.push_back(col_1);
+                }
+                
+                // Concat all 2*W columns back into [2W, H, T, C/2]
+                // Helper to concat vector efficiently
+                struct ggml_tensor* result = cols[0];
+                for (size_t i = 1; i < cols.size(); i++) {
+                    result = ggml_concat(ctx->ggml_ctx, result, cols[i], 0); // Concat along W
+                }
+                x = result;
+                w *= 2;
+                c /= 2;
+                if (trace_shapes) {
+                    LOG_INFO("VAEUpsample3D(REF) after width x2: [%ld, %ld, %ld, %ld]", x->ne[0], x->ne[1], x->ne[2], x->ne[3]);
+                }
+            } else {
+                // axis0 (w) -> 1, axis1 (h*t) -> 2, axis2 (2) -> 0, axis3 (c/2) -> 3
+                // Result: [2, W, HT, C2]
+                x = ggml_reshape_4d(ctx->ggml_ctx, x, w, h*t, 2, c/2); 
+                x = ggml_permute(ctx->ggml_ctx, x, 1, 2, 0, 3);
+                x = ggml_cont(ctx->ggml_ctx, x);
+                x = ggml_reshape_4d(ctx->ggml_ctx, x, 2*w, h, t, c/2);
+                w *= 2;
+                c /= 2;
+                if (trace_shapes) {
+                    LOG_INFO("VAEUpsample3D after width x2: [%ld, %ld, %ld, %ld]", x->ne[0], x->ne[1], x->ne[2], x->ne[3]);
+                }
+            }
+        };
 
-        // 2. Height (H) Expansion (factor 2)
-        // Input: [W, H, T, C] -> Target: [W, 2*H, T, C/2]
-        {
-            // Reshape [W, H, T, C] -> [W, H, 2, C/2 * T] (Merge T and C/2 temporarily)
-            x = ggml_reshape_4d(ctx->ggml_ctx, x, w, h, 2, t*(c/2));
-            
-            // Permute: Move '2' (dim 2) to H (dim 1)
-            // Current: [W, H, 2, Rest]. We want [W, 2, H, Rest].
-            // Args: 0, 2, 1, 3
+        auto apply_height_x2 = [&]() {
+            bool use_ref = getenv("SD_SEEDVR2_UPSAMPLE_HOST_REF") != nullptr;
+            if (use_ref) {
+                // Height reference: Split C -> C_0, C_1. Interleave along H.
+                int64_t c2 = c / 2;
+                struct ggml_tensor* x_c0 = ggml_ext_slice(ctx->ggml_ctx, x, 3, 0, c2);
+                struct ggml_tensor* x_c1 = ggml_ext_slice(ctx->ggml_ctx, x, 3, c2, c);
+                
+                std::vector<struct ggml_tensor*> rows;
+                for (int i = 0; i < h; i++) {
+                    // Slice h=i from c0 and c1
+                    struct ggml_tensor* row_0 = ggml_ext_slice(ctx->ggml_ctx, x_c0, 1, i, i + 1); // [W, 1, T, C/2]
+                    struct ggml_tensor* row_1 = ggml_ext_slice(ctx->ggml_ctx, x_c1, 1, i, i + 1); // [W, 1, T, C/2]
+                    row_0 = ggml_cont(ctx->ggml_ctx, row_0);
+                    row_1 = ggml_cont(ctx->ggml_ctx, row_1);
+                    rows.push_back(row_0);
+                    rows.push_back(row_1);
+                }
+                
+                struct ggml_tensor* result = rows[0];
+                for (size_t i = 1; i < rows.size(); i++) {
+                    result = ggml_concat(ctx->ggml_ctx, result, rows[i], 1); // Concat along H
+                }
+                x = result;
+                h *= 2;
+                c /= 2;
+                if (trace_shapes) {
+                    LOG_INFO("VAEUpsample3D(REF) after height x2: [%ld, %ld, %ld, %ld]", x->ne[0], x->ne[1], x->ne[2], x->ne[3]);
+                }
+            } else {
+                // axis0 (w) -> 0, axis1 (h) -> 2, axis2 (2) -> 1, axis3 (...) -> 3
+                // Result: [W, 2, H, T*C2]
+                x = ggml_reshape_4d(ctx->ggml_ctx, x, w, h, 2, t*(c/2));
+                x = ggml_permute(ctx->ggml_ctx, x, 0, 2, 1, 3);
+                x = ggml_cont(ctx->ggml_ctx, x);
+                x = ggml_reshape_4d(ctx->ggml_ctx, x, w, 2*h, t, c/2);
+                h *= 2;
+                c /= 2;
+                if (trace_shapes) {
+                    LOG_INFO("VAEUpsample3D after height x2: [%ld, %ld, %ld, %ld]", x->ne[0], x->ne[1], x->ne[2], x->ne[3]);
+                }
+            }
+        };
+
+        auto apply_temporal = [&]() {
+            // axis0 (w*h) -> 0, axis1 (t) -> 2, axis2 (2) -> 1, axis3 (c/2) -> 3
+            // Result: [WH, 2, T, C2]
+            x = ggml_reshape_4d(ctx->ggml_ctx, x, w*h, t, 2, c/2);
             x = ggml_permute(ctx->ggml_ctx, x, 0, 2, 1, 3);
             x = ggml_cont(ctx->ggml_ctx, x);
-            
-            // Merge [2, H] -> [2*H]
-            x = ggml_reshape_4d(ctx->ggml_ctx, x, w, 2*h, t, c/2);
-            h *= 2;
+            x = ggml_reshape_4d(ctx->ggml_ctx, x, w, h, 2*t, c/2);
+
+            int64_t t_new = 2 * t;
+            struct ggml_tensor* part1 = ggml_view_4d(ctx->ggml_ctx, x, w, h, 1, c/2, x->nb[1], x->nb[2], x->nb[3], 0);
+            if (t_new > 2) {
+                struct ggml_tensor* part2 = ggml_view_4d(ctx->ggml_ctx, x, w, h, t_new - 2, c/2, x->nb[1], x->nb[2], x->nb[3], 2 * x->nb[2]);
+                x = ggml_concat(ctx->ggml_ctx, part1, part2, 2);
+                t = t_new - 1;
+            } else {
+                x = part1;
+                t = 1;
+            }
             c /= 2;
-        }
+            x = ggml_cont(ctx->ggml_ctx, x);
+            if (trace_shapes) {
+                LOG_INFO("VAEUpsample3D after temporal up: [%ld, %ld, %ld, %ld]", x->ne[0], x->ne[1], x->ne[2], x->ne[3]);
+            }
+        };
 
-        // 3. Time (T) Expansion
+        auto apply_temporal_bypass = [&]() {
+            // Keep model parameter shapes unchanged, but bypass temporal inflation in debug mode.
+            // Drop the upper temporal-factor half in channel-packed representation.
+            x = ggml_ext_slice(ctx->ggml_ctx, x, 3, 0, c/2);
+            c /= 2;
+            x = ggml_cont(ctx->ggml_ctx, x);
+            if (trace_shapes) {
+                LOG_INFO("VAEUpsample3D temporal bypass (slice C): [%ld, %ld, %ld, %ld]", x->ne[0], x->ne[1], x->ne[2], x->ne[3]);
+            }
+        };
+
+        // SeedVR2 factor order is [C_out, Z, Y, X] (fastest -> slowest), so apply temporal first.
         if (temporal_up) {
-             // Reshape [W, H, T, C] -> [WH, T, 2, C/2]
-             x = ggml_reshape_4d(ctx->ggml_ctx, x, w*h, t, 2, c/2);
-             
-             // Permute: Move '2' (dim 2) to T (dim 1)
-             // Current: [WH, T, 2, C2]. We want [WH, 2, T, C2].
-             // Args: 0, 2, 1, 3
-             x = ggml_permute(ctx->ggml_ctx, x, 0, 2, 1, 3);
-             x = ggml_cont(ctx->ggml_ctx, x);
-             
-             // Merge [2, T] -> [2*T]
-             x = ggml_reshape_4d(ctx->ggml_ctx, x, w, h, 2*t, c/2);
-             
-             // Causal remove_head logic (Keep as is)
-             int64_t t_new = 2 * t;
-             struct ggml_tensor* part1 = ggml_view_4d(ctx->ggml_ctx, x, w, h, 1, c/2, x->nb[1], x->nb[2], x->nb[3], 0);
-             if (t_new > 2) {
-                 struct ggml_tensor* part2 = ggml_view_4d(ctx->ggml_ctx, x, w, h, t_new - 2, c/2, x->nb[1], x->nb[2], x->nb[3], 2 * x->nb[2]);
-                 x = ggml_concat(ctx->ggml_ctx, part1, part2, 2);
-                 t = t_new - 1;
-             } else {
-                 x = part1;
-                 t = 1;
-             }
-             c /= 2;
+            if (disable_temporal_up_runtime) {
+                apply_temporal_bypass();
+            } else {
+                apply_temporal();
+            }
         }
+        apply_width_x2();
+        apply_height_x2();
 
-        return std::dynamic_pointer_cast<CausalConv3d>(blocks["conv"])->forward(ctx, x);
+        x = std::dynamic_pointer_cast<CausalConv3d>(blocks["conv"])->forward(ctx, x);
+        if (trace_shapes) {
+            LOG_INFO("VAEUpsample3D end: [%ld, %ld, %ld, %ld]", x->ne[0], x->ne[1], x->ne[2], x->ne[3]);
+        }
+        return x;
     }
 };
 

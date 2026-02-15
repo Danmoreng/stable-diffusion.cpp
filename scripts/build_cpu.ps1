@@ -23,6 +23,9 @@ Import-VSEnv
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $ProjectRoot = Split-Path -Parent $ScriptDir
 $BuildDir = Join-Path $ProjectRoot "build_cpu"
+$OriginalLocation = Get-Location
+
+try {
 
 if ($Clean -and (Test-Path $BuildDir)) {
     Write-Host "Cleaning build directory..."
@@ -55,4 +58,8 @@ if ($LASTEXITCODE -eq 0) {
 } else {
     Write-Host "Build failed!" -ForegroundColor Red
     exit 1
+}
+}
+finally {
+    Set-Location $OriginalLocation
 }

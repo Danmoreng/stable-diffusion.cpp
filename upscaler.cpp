@@ -7,6 +7,10 @@
 #define STB_IMAGE_RESIZE_IMPLEMENTATION
 #include "stb_image_resize.h"
 
+#include <algorithm>
+#include <cmath>
+#include <limits>
+
 struct UpscalerGGML {
     ggml_backend_t backend    = nullptr;  // general backend
     ggml_type model_data_type = GGML_TYPE_F16;
@@ -125,6 +129,8 @@ struct UpscalerGGML {
             // SeedVR2 Upscaling Logic
             int target_width = input_image.width * upscale_factor;
             int target_height = input_image.height * upscale_factor;
+            const bool seedvr2_debug = getenv("SD_SEEDVR2_DEBUG") != nullptr;
+            const bool seedvr2_loopback = getenv("SD_SEEDVR2_LOOPBACK") != nullptr;
             
             // Ensure dimensions are divisible by 16 (VAE requirement)
             target_width = (target_width / 16) * 16;
@@ -161,6 +167,105 @@ struct UpscalerGGML {
                 }
 
                 LOG_ERROR("tensor_to_f32: unsupported type %s", ggml_type_name(t->type));
+            };
+
+            auto require_shape = [&](const char * name, ggml_tensor * t, int64_t ne0, int64_t ne1, int64_t ne2, int64_t ne3) -> bool {
+                if (t == nullptr) {
+                    LOG_ERROR("%s is null", name);
+                    return false;
+                }
+                const int64_t got[4] = { t->ne[0], t->ne[1], t->ne[2], t->ne[3] };
+                const int64_t exp[4] = { ne0, ne1, ne2, ne3 };
+                for (int i = 0; i < 4; ++i) {
+                    if (exp[i] >= 0 && got[i] != exp[i]) {
+                        LOG_ERROR("%s shape mismatch at dim %d: got %lld expected %lld. Full shape=[%lld,%lld,%lld,%lld]",
+                                  name, i, (long long)got[i], (long long)exp[i],
+                                  (long long)got[0], (long long)got[1], (long long)got[2], (long long)got[3]);
+                        return false;
+                    }
+                }
+                return true;
+            };
+
+            auto require_nelements = [&](const char * name, ggml_tensor * t, int64_t expected) -> bool {
+                if (t == nullptr) {
+                    LOG_ERROR("%s is null", name);
+                    return false;
+                }
+                const int64_t got = ggml_nelements(t);
+                if (got != expected) {
+                    LOG_ERROR("%s element count mismatch: got %lld expected %lld", name, (long long)got, (long long)expected);
+                    return false;
+                }
+                return true;
+            };
+
+            auto check_finite_tensor = [&](const char * name, ggml_tensor * t, bool log_stats = false) -> bool {
+                if (t == nullptr) {
+                    LOG_ERROR("%s is null", name);
+                    return false;
+                }
+                std::vector<float> host;
+                tensor_to_f32(t, host);
+                if (host.empty()) {
+                    LOG_ERROR("%s could not be converted to float host data", name);
+                    return false;
+                }
+                double sum = 0.0;
+                double sum_sq = 0.0;
+                float min_val = std::numeric_limits<float>::infinity();
+                float max_val = -std::numeric_limits<float>::infinity();
+                for (size_t i = 0; i < host.size(); ++i) {
+                    const float v = host[i];
+                    if (!std::isfinite(v)) {
+                        LOG_ERROR("%s has non-finite value at index %zu: %f", name, i, v);
+                        return false;
+                    }
+                    sum += v;
+                    sum_sq += (double)v * (double)v;
+                    min_val = std::min(min_val, v);
+                    max_val = std::max(max_val, v);
+                }
+                if (log_stats) {
+                    const double n = (double)host.size();
+                    const double mean = sum / n;
+                    const double var = std::max(0.0, sum_sq / n - mean * mean);
+                    const double stddev = std::sqrt(var);
+                    LOG_INFO("%s stats: mean=%.6f std=%.6f min=%.6f max=%.6f n=%lld",
+                             name, mean, stddev, min_val, max_val, (long long)host.size());
+                }
+                return true;
+            };
+
+            auto check_finite_host = [&](const char * name, const std::vector<float> & host, bool log_stats = false) -> bool {
+                if (host.empty()) {
+                    LOG_ERROR("%s is empty", name);
+                    return false;
+                }
+                double sum = 0.0;
+                double sum_sq = 0.0;
+                float min_val = std::numeric_limits<float>::infinity();
+                float max_val = -std::numeric_limits<float>::infinity();
+                for (size_t i = 0; i < host.size(); ++i) {
+                    const float v = host[i];
+                    if (!std::isfinite(v)) {
+                        LOG_ERROR("%s has non-finite value at index %zu: %f", name, i, v);
+                        return false;
+                    }
+                    sum += v;
+                    sum_sq += (double)v * (double)v;
+                    min_val = std::min(min_val, v);
+                    max_val = std::max(max_val, v);
+                }
+                if (log_stats) {
+                    const double n = (double)host.size();
+                    const double mean = sum / n;
+                    const double var = std::max(0.0, sum_sq / n - mean * mean);
+                    const double stddev = std::sqrt(var);
+                    LOG_INFO("%s stats: mean=%.6f std=%.6f min=%.6f max=%.6f n=%lld",
+                             name, mean, stddev, min_val, max_val, (long long)host.size());
+                }
+                return true;
             };
 
             // 1. Resize Image (Float Precision)
@@ -201,6 +306,11 @@ struct UpscalerGGML {
                     }
                 }
             }
+            if (!require_shape("seedvr2.vae_encode_input", x, target_width, target_height, 3, 1) ||
+                !check_finite_tensor("seedvr2.vae_encode_input", x, seedvr2_debug)) {
+                ggml_free(work_ctx);
+                return {0, 0, 0, nullptr};
+            }
 
             // 3. VAE Encode
             if (getenv("SD_DUMP_TENSORS")) {
@@ -218,21 +328,25 @@ struct UpscalerGGML {
                 ggml_free(work_ctx);
                 return {0, 0, 0, nullptr};
             }
-            
-            {
-                // Stats for latents
-                double sum = 0.0, sum_sq = 0.0;
-                float min_val = 1e9, max_val = -1e9;
-                for (int i=0; i<ggml_nelements(latents); i++) {
-                    float v = ((float*)latents->data)[i];
-                    sum += v;
-                    sum_sq += v*v;
-                    if (v < min_val) min_val = v;
-                    if (v > max_val) max_val = v;
-                }
-                double mean = sum / ggml_nelements(latents);
-                double std = sqrt(sum_sq / ggml_nelements(latents) - mean*mean);
-                LOG_INFO("Encoded Latents Stats: Mean=%.4f, Std=%.4f, Min=%.4f, Max=%.4f", mean, std, min_val, max_val);
+            if (latents == nullptr || latents->ne[0] <= 0 || latents->ne[1] <= 0) {
+                LOG_ERROR("SeedVR2 VAE encode returned invalid latents");
+                ggml_free(work_ctx);
+                return {0, 0, 0, nullptr};
+            }
+            const bool latent_shape_ok =
+                (latents->ne[2] == 16 && latents->ne[3] == 1) ||
+                (latents->ne[2] == 1 && latents->ne[3] == 16);
+            if (!latent_shape_ok) {
+                LOG_ERROR("Unexpected latent shape: [%lld,%lld,%lld,%lld], expected channel=16 with T=1",
+                          (long long)latents->ne[0], (long long)latents->ne[1],
+                          (long long)latents->ne[2], (long long)latents->ne[3]);
+                ggml_free(work_ctx);
+                return {0, 0, 0, nullptr};
+            }
+            if (!require_nelements("seedvr2.vae_latents", latents, latents->ne[0] * latents->ne[1] * 16) ||
+                !check_finite_tensor("seedvr2.vae_latents", latents, true)) {
+                ggml_free(work_ctx);
+                return {0, 0, 0, nullptr};
             }
 
             if (getenv("SD_DUMP_TENSORS")) {
@@ -266,6 +380,11 @@ struct UpscalerGGML {
             // Patchify parameters
             int patch_size = 2;
             int C_in = 33; // 16 (noisy) + 16 (cond) + 1 (mask)
+            if ((lw % patch_size) != 0 || (lh % patch_size) != 0) {
+                LOG_ERROR("Latent dimensions must be divisible by patch size %d, got lw=%d lh=%d", patch_size, lw, lh);
+                ggml_free(work_ctx);
+                return {0, 0, 0, nullptr};
+            }
             int n_tokens_w = lw / patch_size;
             int n_tokens_h = lh / patch_size;
             int n_tokens = n_tokens_w * n_tokens_h;
@@ -343,6 +462,10 @@ struct UpscalerGGML {
                     }
                 }
             }
+            if (!check_finite_host("seedvr2.dit_input_host", dit_input_host, seedvr2_debug)) {
+                ggml_free(work_ctx);
+                return {0, 0, 0, nullptr};
+            }
             
             // Copy patchified data to device
             // We explicitly allocate backend buffer for input to avoid GGMLRunner::to_backend issues
@@ -384,13 +507,26 @@ struct UpscalerGGML {
 
             // 5. DiT Upscale
             ggml_tensor* upscaled_latents = nullptr;
-            if (!seedvr2_dit->compute(n_threads, dit_input, t, context, &upscaled_latents, work_ctx)) {
-                LOG_ERROR("SeedVR2 DiT upscale failed");
-                if (dit_input_buffer) ggml_backend_buffer_free(dit_input_buffer);
-                if (t_buffer) ggml_backend_buffer_free(t_buffer);
-                if (context_buffer) ggml_backend_buffer_free(context_buffer);
-                ggml_free(work_ctx);
-                return {0, 0, 0, nullptr};
+            if (seedvr2_loopback) {
+                LOG_WARN("SD_SEEDVR2_LOOPBACK enabled: bypassing DiT and feeding VAE latents directly to decoder.");
+                upscaled_latents = latents;
+            } else {
+                if (!seedvr2_dit->compute(n_threads, dit_input, t, context, &upscaled_latents, work_ctx)) {
+                    LOG_ERROR("SeedVR2 DiT upscale failed");
+                    if (dit_input_buffer) ggml_backend_buffer_free(dit_input_buffer);
+                    if (t_buffer) ggml_backend_buffer_free(t_buffer);
+                    if (context_buffer) ggml_backend_buffer_free(context_buffer);
+                    ggml_free(work_ctx);
+                    return {0, 0, 0, nullptr};
+                }
+                if (!require_nelements("seedvr2.dit_output", upscaled_latents, (int64_t)n_tokens * patch_size * patch_size * 16) ||
+                    !check_finite_tensor("seedvr2.dit_output", upscaled_latents, true)) {
+                    if (dit_input_buffer) ggml_backend_buffer_free(dit_input_buffer);
+                    if (t_buffer) ggml_backend_buffer_free(t_buffer);
+                    if (context_buffer) ggml_backend_buffer_free(context_buffer);
+                    ggml_free(work_ctx);
+                    return {0, 0, 0, nullptr};
+                }
             }
             
             // Clean up input buffers (if they were allocated)
@@ -398,7 +534,7 @@ struct UpscalerGGML {
             if (t_buffer) ggml_backend_buffer_free(t_buffer);
             if (context_buffer) ggml_backend_buffer_free(context_buffer);
 
-            if (getenv("SD_DUMP_TENSORS")) {
+            if (!seedvr2_loopback && getenv("SD_DUMP_TENSORS")) {
                 FILE* f = fopen("cpp_upscaled_latents.bin", "wb");
                 if (f) {
                     fwrite(upscaled_latents->data, 1, ggml_nbytes(upscaled_latents), f);
@@ -449,7 +585,11 @@ struct UpscalerGGML {
                 
                 // Validate dimensions
                 if (ggml_nelements(upscaled_latents) != n_tokens * patch_size_w * patch_size_h * channels) {
-                     LOG_ERROR("Dimension mismatch in unpatchify! DiT output size: %ld, Expected: %d", ggml_nelements(upscaled_latents), n_tokens * patch_size_w * patch_size_h * channels);
+                     LOG_ERROR("Dimension mismatch in unpatchify! DiT output size: %lld, expected: %d",
+                               (long long)ggml_nelements(upscaled_latents),
+                               n_tokens * patch_size_w * patch_size_h * channels);
+                     ggml_free(work_ctx);
+                     return {0, 0, 0, nullptr};
                 }
 
                 // Iterate tokens (patches)
@@ -483,6 +623,11 @@ struct UpscalerGGML {
                 }
                 LOG_INFO("Unpatchify completed.");
             }
+            if (!require_shape("seedvr2.unpatchified_latents", unpatchified, lw, lh, 1, 16) ||
+                !check_finite_tensor("seedvr2.unpatchified_latents", unpatchified, true)) {
+                ggml_free(work_ctx);
+                return {0, 0, 0, nullptr};
+            }
 
             LOG_INFO("Running VAE decode (Tiled)...");
             
@@ -496,13 +641,36 @@ struct UpscalerGGML {
             // Tiling params
             int vae_tile_size = 64; // Latent tile size (Input to VAE)
             if (getenv("SD_FORCE_SINGLE_TILE")) {
-                vae_tile_size = std::max((int)lw, 64);
+                vae_tile_size = std::max(std::max((int)lw, (int)lh), 64);
                 LOG_WARN("!!! SD_FORCE_SINGLE_TILE ENABLED !!! Tile Size: %d", vae_tile_size);
             }
             float vae_overlap = 0.25f;
             int vae_scale = 8;
+            const bool disable_tiling = getenv("SD_DISABLE_TILING") != nullptr;
 
             LOG_INFO("VAE Tiling: input %dx%d, scale %d, tile_size %d", (int)tile_input->ne[0], (int)tile_input->ne[1], vae_scale, vae_tile_size);
+
+            auto pack_vae_decode_input = [&](ggml_context * ctx, ggml_tensor * src_whc) -> ggml_tensor * {
+                // src_whc is logical [W,H,16,1] (channels in ne2). We pack into contiguous [W,H,1,16].
+                ggml_tensor * packed = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, src_whc->ne[0], src_whc->ne[1], 1, 16);
+                float * dst = (float *)packed->data;
+                const int W = (int)src_whc->ne[0];
+                const int H = (int)src_whc->ne[1];
+                const int C = 16;
+                for (int c = 0; c < C; ++c) {
+                    for (int y = 0; y < H; ++y) {
+                        for (int x = 0; x < W; ++x) {
+                            const size_t src_off = (size_t)x * src_whc->nb[0] +
+                                                   (size_t)y * src_whc->nb[1] +
+                                                   (size_t)c * src_whc->nb[2];
+                            const float v = *(float *)((char *)src_whc->data + src_off);
+                            const size_t dst_idx = (size_t)x + (size_t)y * W + (size_t)c * W * H;
+                            dst[dst_idx] = v;
+                        }
+                    }
+                }
+                return packed;
+            };
 
             auto on_tiling = [&](ggml_tensor* in, ggml_tensor* out, bool init) {
                 // in: [TileW, TileH, 16, 1] (Tile Input)
@@ -512,14 +680,23 @@ struct UpscalerGGML {
                 struct ggml_init_params tile_params = { 128 * 1024 * 1024, nullptr, false };
                 struct ggml_context* tile_ctx = ggml_init(tile_params);
                 
-                // Reshape in back to [TileW, TileH, 1, 16] for SeedVR2VAE
-                struct ggml_tensor* vae_in = ggml_view_4d(tile_ctx, in, in->ne[0], in->ne[1], 1, 16,
-                                                         in->nb[1], in->nb[2], in->nb[2], 0);
+                // Pack into contiguous [TileW, TileH, 1, 16] for SeedVR2VAE to avoid stride/view ambiguity.
+                struct ggml_tensor* vae_in = pack_vae_decode_input(tile_ctx, in);
                 
                 struct ggml_tensor* vae_out = nullptr;
                 if (!seedvr2_vae->compute(n_threads, vae_in, true, &vae_out, tile_ctx)) {
                     LOG_ERROR("Tile VAE decode failed");
                 } else {
+                    LOG_INFO("Tile VAE raw output shape: [%lld, %lld, %lld, %lld], expected [%lld, %lld, 3, 1]",
+                             (long long)vae_out->ne[0], (long long)vae_out->ne[1],
+                             (long long)vae_out->ne[2], (long long)vae_out->ne[3],
+                             (long long)out->ne[0], (long long)out->ne[1]);
+                    if (vae_out->ne[0] != out->ne[0] ||
+                        vae_out->ne[1] != out->ne[1] ||
+                        vae_out->ne[2] != 3 ||
+                        vae_out->ne[3] != 1) {
+                        LOG_ERROR("Unexpected tile VAE output shape; raw memcpy may corrupt image layout.");
+                    }
                     // vae_out is already [TileW*8, TileH*8, 3, 1] (ae.decode handles permutation)
                     memcpy(out->data, vae_out->data, ggml_nbytes(out));
                 }
@@ -528,7 +705,40 @@ struct UpscalerGGML {
                 ggml_free(tile_ctx);
             };
 
-            sd_tiling(tile_input, decoded, vae_scale, vae_tile_size, vae_overlap, on_tiling);
+            if (disable_tiling) {
+                LOG_WARN("!!! SD_DISABLE_TILING ENABLED !!! Running single full-frame VAE decode.");
+                struct ggml_init_params full_params = { 256 * 1024 * 1024, nullptr, false };
+                struct ggml_context* full_ctx = ggml_init(full_params);
+                struct ggml_tensor* vae_in = pack_vae_decode_input(full_ctx, tile_input);
+                struct ggml_tensor* vae_out = nullptr;
+                if (!seedvr2_vae->compute(n_threads, vae_in, true, &vae_out, full_ctx)) {
+                    LOG_ERROR("Full-frame VAE decode failed");
+                    seedvr2_vae->free_compute_buffer();
+                    ggml_free(full_ctx);
+                    ggml_free(work_ctx);
+                    return {0, 0, 0, nullptr};
+                }
+                LOG_INFO("Full-frame VAE raw output shape: [%lld, %lld, %lld, %lld], expected [%d, %d, 3, 1]",
+                         (long long)vae_out->ne[0], (long long)vae_out->ne[1],
+                         (long long)vae_out->ne[2], (long long)vae_out->ne[3],
+                         target_width, target_height);
+                if (vae_out->ne[0] != target_width ||
+                    vae_out->ne[1] != target_height ||
+                    vae_out->ne[2] != 3 ||
+                    vae_out->ne[3] != 1) {
+                    LOG_ERROR("Unexpected full-frame VAE output shape; raw memcpy may corrupt image layout.");
+                }
+                memcpy(decoded->data, vae_out->data, ggml_nbytes(decoded));
+                seedvr2_vae->free_compute_buffer();
+                ggml_free(full_ctx);
+            } else {
+                sd_tiling(tile_input, decoded, vae_scale, vae_tile_size, vae_overlap, on_tiling);
+            }
+            if (!require_shape("seedvr2.vae_decoded", decoded, target_width, target_height, 3, 1) ||
+                !check_finite_tensor("seedvr2.vae_decoded", decoded, true)) {
+                ggml_free(work_ctx);
+                return {0, 0, 0, nullptr};
+            }
 
             // 7. Tensor to Image (Denormalize -1..1 -> 0..1 -> 0..255)
             LOG_INFO("Converting decoded tensor to final image... output shape: %dx%d", (int)decoded->ne[0], (int)decoded->ne[1]);
